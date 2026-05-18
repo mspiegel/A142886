@@ -169,8 +169,11 @@ shipped coexisting variant).
       indexing, `max_scan_d`/`max_slots`, ported `in_wedge`/edge
       predicates/`edge_reach_lb`. Geometry unit tests green; legacy +
       public API byte-unchanged.
-- [ ] **Phase 2 — weight DP.** Occupancy + weight transfer DP, accept on
-      `weight==n` & both edge flags, *no* connectivity yet (over-counts).
+- [x] **Phase 2 — weight DP.** `(weight, x-touched, diag-touched)` knapsack
+      over the scan, residue/apex dispatch (§3.3/§4.6(a)). No connectivity
+      yet — proven to over-count `legacy` per center (n≤40) and byte-exact
+      vs a brute subset oracle over the same bounded region (n∈{1,4,5,8,9},
+      cell+vertex).
 - [ ] **Phase 3 — connectivity signature.** Jensen non-crossing partition:
       merge + re-canonicalize, component-death rule, flag carry on
       retirement. Debug-assert canonical form / monotone weight / width ≤ 64.

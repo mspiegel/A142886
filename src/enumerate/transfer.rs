@@ -16,7 +16,7 @@
 // removed at GO when this module becomes the live engine.
 #![allow(dead_code)]
 
-use crate::symmetry::Cell;
+use crate::symmetry::{orbit_size, Cell, Center};
 
 // ── Pure wedge / edge helpers ───────────────────────────────────────────────
 // Ported verbatim from the legacy engine (enumerate/legacy.rs §4.6,
@@ -170,9 +170,75 @@ impl Iterator for WedgeScan {
     }
 }
 
+// ── Phase 2: occupancy + weight DP (no connectivity) ────────────────────────
+//
+// A pure `(weight, x-touched, diag-touched)` knapsack over the anti-diagonal
+// scan: count subsets `S` of the bounded wedge (`d ≤ max_scan_d(n)`) with
+// `Σ orbit_size(center,c) == n` that touch the x-axis edge *and* the diagonal
+// edge — §4.1 condition 2 only, **without** condition 1 (a single 4-connected
+// component). This *over-counts* `a(n)` (it admits disconnected and
+// multi-component sets); Phase 3 layers the Jensen connectivity signature on
+// top to recover exactly `legacy::enumerate(center, n)`.
+//
+// It is finite only because the scan bound is the *valid-slice* geometry
+// bound (a single weight-4 edge cell can sit arbitrarily far out, so the
+// unbounded no-connectivity count is infinite) — so this figure is a
+// machinery scaffold, not a combinatorial quantity on its own. It exercises
+// the weight accounting, the residue/apex dispatch (§3.3 / §4.6(a)) and the
+// edge-flag logic exactly as Phase 3 will, on a state space small enough to
+// brute-check.
+
+/// Phase-2 over-count (see module note above). `n > 0`; cell requires
+/// `n % 4 ∈ {0,1}`, vertex requires `4 | n` (caller-enforced, as in §3.3).
+pub(crate) fn count_phase2(center: Center, n: usize) -> u64 {
+    debug_assert!(n > 0, "n=0 is the count(0)=1 convention, handled upstream");
+    // Residue/center dispatch — identical to §3.3 / §4.6(a) and to the
+    // `legacy` engine, so Phase 3 inherits it unchanged.
+    let apex_forced = center == Center::Cell && n % 4 == 1; // (0,0) ∈ S
+    let apex_forbidden = center == Center::Cell && n % 4 == 0; // (0,0) ∉ S
+
+    let nn = n as u32;
+    // dp indexed by (weight, x-touched, diag-touched).
+    let idx = |w: u32, tx: bool, td: bool| (w as usize) * 4 + (tx as usize) * 2 + td as usize;
+    let mut dp = vec![0u64; (n + 1) * 4];
+    if apex_forced {
+        dp[idx(1, true, true)] = 1; // apex: weight 1, on both edges, never branched
+    } else {
+        dp[idx(0, false, false)] = 1; // empty config
+    }
+
+    let mut next = vec![0u64; (n + 1) * 4];
+    for (_, _, c) in WedgeScan::new(max_scan_d(n)) {
+        if c == (0, 0) && (apex_forced || apex_forbidden) {
+            continue; // apex pre-decided (forced in / forbidden out)
+        }
+        let w = orbit_size(center, c) as u32;
+        let ex = on_x_axis_edge(c);
+        let ed = on_diagonal_edge(c);
+        next.iter_mut().for_each(|s| *s = 0);
+        for ww in 0..=nn {
+            for tx in [false, true] {
+                for td in [false, true] {
+                    let cnt = dp[idx(ww, tx, td)];
+                    if cnt == 0 {
+                        continue;
+                    }
+                    next[idx(ww, tx, td)] += cnt; // c empty
+                    if ww + w <= nn {
+                        next[idx(ww + w, tx | ex, td | ed)] += cnt; // c occupied
+                    }
+                }
+            }
+        }
+        std::mem::swap(&mut dp, &mut next);
+    }
+    dp[idx(nn, true, true)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enumerate::legacy;
     use std::collections::HashSet;
 
     /// The anti-diagonal scan visits **exactly** the wedge triangle
@@ -271,5 +337,98 @@ mod tests {
         }
         // headroom check: even the loose bound stays well under 64.
         assert!(max_slots(163) <= 64);
+    }
+
+    /// Brute subset count over the **same** bounded region and apex rule as
+    /// `count_phase2` — an exact oracle for the knapsack/flag/residue
+    /// machinery, independent of connectivity (which Phase 2 omits).
+    fn brute_phase2(center: Center, n: usize) -> u64 {
+        let apex_forced = center == Center::Cell && n % 4 == 1;
+        let apex_forbidden = center == Center::Cell && n % 4 == 0;
+        let mut cells: Vec<Cell> = Vec::new();
+        for (_, _, c) in WedgeScan::new(max_scan_d(n)) {
+            if c == (0, 0) && (apex_forced || apex_forbidden) {
+                continue;
+            }
+            cells.push(c);
+        }
+        assert!(cells.len() <= 20, "brute infeasible: {} cells, n={n}", cells.len());
+        let (bw, btx, btd) = if apex_forced {
+            (1u32, true, true)
+        } else {
+            (0u32, false, false)
+        };
+        let mut total = 0u64;
+        for mask in 0u32..(1u32 << cells.len()) {
+            let (mut w, mut tx, mut td) = (bw, btx, btd);
+            for (b, &c) in cells.iter().enumerate() {
+                if mask & (1 << b) != 0 {
+                    w += orbit_size(center, c) as u32;
+                    tx |= on_x_axis_edge(c);
+                    td |= on_diagonal_edge(c);
+                    if w > n as u32 {
+                        break;
+                    }
+                }
+            }
+            if w == n as u32 && tx && td {
+                total += 1;
+            }
+        }
+        total
+    }
+
+    /// Phase 2 DP == brute subset count on every residue/center it dispatches,
+    /// for `n` small enough to brute-enumerate the bounded region.
+    #[test]
+    fn phase2_matches_brute_subset_machinery() {
+        for &n in &[1usize, 5, 9] {
+            // cell, n ≡ 1 mod 4 (apex forced)
+            assert_eq!(
+                count_phase2(Center::Cell, n),
+                brute_phase2(Center::Cell, n),
+                "cell n={n}"
+            );
+        }
+        for &n in &[4usize, 8] {
+            // n ≡ 0 mod 4: cell (apex forbidden) + vertex
+            assert_eq!(
+                count_phase2(Center::Cell, n),
+                brute_phase2(Center::Cell, n),
+                "cell n={n}"
+            );
+            assert_eq!(
+                count_phase2(Center::Vertex, n),
+                brute_phase2(Center::Vertex, n),
+                "vertex n={n}"
+            );
+        }
+    }
+
+    /// Connectivity-free Phase 2 must *over-count* the proven `legacy`
+    /// engine per center: every valid (connected, both-edge) slice fits the
+    /// scan bound (proven in `max_scan_d`), so it is among the subsets
+    /// Phase 2 counts.
+    #[test]
+    fn phase2_overcounts_legacy_per_center() {
+        for n in 1usize..=40 {
+            match n % 4 {
+                0 => {
+                    assert!(
+                        count_phase2(Center::Cell, n) >= legacy::count_cell_centered(n),
+                        "cell n={n}"
+                    );
+                    assert!(
+                        count_phase2(Center::Vertex, n) >= legacy::count_vertex_centered(n),
+                        "vertex n={n}"
+                    );
+                }
+                1 => assert!(
+                    count_phase2(Center::Cell, n) >= legacy::count_cell_centered(n),
+                    "cell n={n}"
+                ),
+                _ => {}
+            }
+        }
     }
 }
