@@ -321,9 +321,17 @@ not promise the full b-file (n ≤ 163).
 A transfer/kernel reformulation — processing the wedge by diagonals with a
 bounded frontier state carrying the connectivity signature — was evaluated as
 the route to polynomial-per-term depth. In practice it was **not faster** than
-the §4.6-pruned enumerator at the depths of interest (its per-node state
-bookkeeping outweighed the branching it removed once §4.6 was in place), so it
-is not pursued and is intentionally absent from the plan.
+the §4.6-pruned enumerator **at the depths of interest** (its per-node state
+bookkeeping outweighed the branching it removed once §4.6 was in place). That
+verdict is *depth-conditioned* — a constant-factor argument valid for n ≲ 110,
+not a refutation of the method's asymptotics. The b-file reaches n=163 only
+because it is the OEIS-published composition `a(n)=A351127(n)+A346800(n/4)`
+(§3.3), whose siblings are computed by exactly such a transfer matrix, not by
+brute-force enumeration of A142886. For the **n ≫ 110 / full-b-file regime**
+the premise inverts (state count ≈ output size ≈ 1.19ⁿ vs the enumerator's
+≈ 1.32ⁿ); §4.7 reopens the transfer matrix for *that regime only*, under an
+empirical Go/No-Go gate. The separately-refuted variants below (two-terminal
+`(A,B)`, and in §4.6 the column-span bound / xmax cache-cap) remain rejected.
 
 A **two-terminal `(A,B)` variant** was also evaluated: pin *both* the minimal
 x-axis cell `A` and the minimal diagonal cell `B = (bx, bx)`, bucket by the
@@ -463,6 +471,99 @@ prior engine; n ≤ 68 vs b-file / `REFERENCE`):
 
 Pure node-count reduction at unchanged O(1) per-node cost (profile stays
 ~100% self-time in `grow`); still exponential (§4.5).
+
+### 4.7 Transfer-matrix enumerator (n ≫ 110 regime) — M6 bring-up
+
+The §4.2/§4.6 enumerator *enumerates* every connected wedge slice (≈ 1.32ⁿ,
+≈ 3× per +4 in n); it walls out near n ≈ 108. The valid count itself grows
+≈ 1.18ⁿ. A Jensen-style transfer matrix that *counts without enumerating* —
+sweeping the wedge by anti-diagonals and summing a bounded frontier state —
+has cost ≈ Catalan(frontier width) ≈ 1.19ⁿ, i.e. **output-sized**. That is an
+asymptotic class change (≈ (1.32/1.19)ⁿ ≈ 10⁷ at n=160), the correct lever for
+the n ≫ 110 / full-b-file regime that §4.5's *depth-conditioned* rejection
+does not cover. This supersedes that rejection **only for n ≫ 110**, under the
+Go/No-Go gate below; the separately-refuted variants stay rejected.
+
+**Scan.** Process wedge cells by anti-diagonal `d = x + y = 0,1,2,…`, ties by
+increasing `y`. On `d` the wedge cells are `{(d−y, y) : 0 ≤ y ≤ ⌊d/2⌋}`, so
+the anti-diagonal — hence the frontier — has only `⌊d/2⌋+1` cells (width grows
+by ≤1 every two anti-diagonals; a column scan would be ≈ n/2 wide and
+hopeless). A 4-step changes `d` by ±1, so the frontier between processed
+(`x+y<d`) and unprocessed cells is a clean staircase. The scan is bounded by
+`max_scan_d(n) = 2·(n/4+1)` (rigorous: a valid slice's bounding box obeys
+`W_x+W_y ≤ |S|+1`, touches `y=0` and a diagonal `(k,k)`, so
+`max_x ≤ |S|−1 ≤ n/4`); the per-state `edge_reach_lb` prune tightens it
+dynamically.
+
+**State** `(F_occ, F_sig, weight, flags)` accumulated in a `HashMap<key,
+Count>` (the transfer matrix applied implicitly): `F_occ` = `u64` occupancy
+mask of the live frontier slots (slot index = `y`; ≤ 64 invariant — at n=163
+the loose bound is 42); `F_sig` = the Jensen non-crossing partition of
+occupied frontier slots into 4-connected components, canonical bracket form,
+each component carrying `comp_has_xaxis`/`comp_has_diagonal` bits; `weight` =
+`Σ orbit_size(center,c)` over occupied cells (the *same* `orbit_size` as §3,
+not a reimplementation); `flags` = global x-axis/diagonal touched. Transition
+per cell branches empty/occupied; ≤2 already-decided neighbours ⇒ new / join /
+merge+re-canonicalize. Successors are summed under the canonicalized key —
+that collapse is the entire asymptotic win.
+
+**Single-component constraint (§4.1 cond. 1).** When a frontier slot retires
+(no future cell can be 4-adjacent), if a component fully retires while another
+live component still exists the state can never become one connected slice ⇒
+**discard it** (Jensen premature-closure rule — exactly what prevents
+multi-component slices being counted). Accept a terminal state iff: exactly
+one component ever ∧ `weight==n` ∧ both global edge flags. Residue/center
+mapping is the *identical* dispatch as §3.3/§4.6(a): n≡1 mod 4 force apex
+(0,0) (flags free); n≡0 mod 4 forbid apex (flags bind); vertex only 4|n. The
+sum of accepted multiplicities is exactly `enumerate(center, n)`.
+
+The geometry layer is verified directly — the scan must reproduce the wedge
+triangle exactly, in order:
+
+```rust
+#[test]
+fn scan_covers_wedge_triangle_in_order() {
+    for r in 0..=24 {
+        let mut direct = std::collections::HashSet::new();
+        for x in 0..=r { for y in 0..=x { if x+y<=r { direct.insert((x,y)); } } }
+        let mut seen = std::collections::HashSet::new();
+        let mut prev = (-1, -1);
+        for (d, y, c) in WedgeScan::new(r) {
+            assert!(in_wedge(c) && c == (d-y, y) && d == c.0+c.1);
+            assert!((d, y) > prev);          // nondecreasing (d, y)
+            prev = (d, y);
+            assert!(seen.insert(c));         // each cell once
+        }
+        assert_eq!(seen, direct);            // == the wedge triangle
+    }
+}
+```
+
+and the engine is gated by a zero-tolerance differential against the proven
+§4.2/§4.6 `legacy` engine plus the §4.1 oracle (Phase 4):
+
+```rust
+#[test] #[ignore] // cargo test --release -- --ignored diff_legacy
+fn diff_legacy() {
+    for n in (0..=DIFF_BOUND).filter(|n| n % 4 == 0 || n % 4 == 1) {
+        assert_eq!(transfer::count_cell_centered(n), legacy::count_cell_centered(n));
+        assert_eq!(transfer::count_vertex_centered(n), legacy::count_vertex_centered(n));
+        assert_eq!(transfer::count(n), legacy::count(n)); // byte-identical
+    }
+}
+```
+
+**M6 status.** *Bring-up, gated.* Phase 1 (anti-diagonal scaffolding,
+`src/enumerate/transfer.rs`) landed; `legacy` stays the live engine so the
+crate is green at every commit. Phases 2 (weight DP) → 3 (connectivity
+signature) → 4 (differential gate) → 5 follow. **GO** (transfer
+byte-identical to `legacy` for all feasible n and matching the b-file past
+n≈110): `transfer` becomes the sole engine, `legacy` is deleted in the same
+commit, `verify::DEEP_BOUND` 68→163. **NO-GO** (unresolved mismatch, or state
+count empirically in the ≈1.32ⁿ class, or n=140 still infeasible): discard
+`transfer`, revert the pure-move split, record measured n≫110 numbers in
+FUTURE.md. Reachable depth stays empirical (§4.5 discipline) — n=163 is the
+asymptotic target, never promised a priori.
 
 ## 5. Rust implementation sketch
 

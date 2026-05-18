@@ -5,6 +5,19 @@ re-raised in conversation.
 
 _No deferred work is currently parked._
 
+## In progress (gated, not parked)
+
+- **Transfer matrix reopened for n ≫ 110 — M6, gated bring-up.** The
+  transfer/kernel rejection below is *depth-conditioned* (n ≲ 110, a
+  constant-factor argument). The b-file reaches n=163 only as the OEIS
+  composition `a(n)=A351127(n)+A346800(n/4)` (DESIGN §3.3); the siblings use
+  exactly such a transfer matrix. For n ≫ 110 the premise inverts (state
+  count ≈ output ≈ 1.19ⁿ vs the enumerator's ≈ 1.32ⁿ). Reopened by explicit
+  user decision under an approved phased plan with an empirical Go/No-Go
+  (DESIGN §4.7, PLAN M6). The single-core *constant-factor* ledger stays
+  closed; this is the *asymptotic* path, gated to self-terminate and revert
+  cleanly on NO-GO. Outcome (GO or NO-GO) lands here with measured numbers.
+
 ## Resolved / evaluated-and-rejected (do not re-propose)
 
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
