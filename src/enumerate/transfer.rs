@@ -235,6 +235,345 @@ pub(crate) fn count_phase2(center: Center, n: usize) -> u64 {
     dp[idx(nn, true, true)]
 }
 
+// ── Phase 3: connectivity-signature transfer matrix ─────────────────────────
+//
+// The Jensen device. Sweeping anti-diagonals, a 4-step changes `d=x+y` by ±1,
+// so no two cells on the same anti-diagonal are 4-adjacent and every cell's
+// only already-decided neighbours are the two cells of anti-diagonal `d−1` at
+// slots `y` (cell `(x−1,y)`, in-wedge iff `x>y`) and `y−1` (cell `(x,y−1)`,
+// in-wedge iff `y≥1`). So connected components are built incrementally by
+// union over backward links; the frontier state is the just-completed
+// anti-diagonal's occupancy + a canonical (non-crossing) component partition +
+// per-component "touched x-axis / diagonal" bits + accumulated weight.
+//
+// A component **retires** when no cell of the new anti-diagonal links to it
+// (it has no frontier cell, so nothing can ever connect to it again). §4.1
+// condition 1 (exactly one 4-connected component) ⇒ the *only* legal
+// retirement is the sole remaining component finishing with nothing left on
+// the frontier; any other retirement severs a piece ⇒ the branch is dead.
+// Distinct partial slices with the same frontier state share all futures, so
+// their multiplicities sum — the collapse that makes this output-sized.
+
+const EMPTY: u8 = u8::MAX;
+
+/// A frontier state after a completed anti-diagonal. `occ[y]` = `EMPTY` or the
+/// canonical component id of the occupied cell at slot `y`; `cx`/`cd` =
+/// per-component "has an x-axis-edge / diagonal-edge cell"; `w` = total orbit
+/// weight so far. Canonical labels (ids assigned by first occupied slot in
+/// `y` order) make equivalent partitions collapse to one key.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Frontier {
+    occ: Vec<u8>,
+    cx: Vec<bool>,
+    cd: Vec<bool>,
+    w: u32,
+}
+
+/// Union–find over `old-component nodes (0..ncomp)` ∪ `occupied-slot nodes`.
+struct Uf {
+    p: Vec<usize>,
+}
+impl Uf {
+    fn new(n: usize) -> Self {
+        Uf {
+            p: (0..n).collect(),
+        }
+    }
+    fn find(&mut self, mut a: usize) -> usize {
+        while self.p[a] != a {
+            self.p[a] = self.p[self.p[a]];
+            a = self.p[a];
+        }
+        a
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.p[ra] = rb;
+        }
+    }
+}
+
+/// Debug-only: a canonical frontier partition over a planar staircase must be
+/// **non-crossing** — no `A … B … A … B` over occupied slots (`A≠B`). If this
+/// ever fires the scan/adjacency model is wrong (and the Catalan state bound
+/// with it).
+#[cfg(debug_assertions)]
+fn assert_non_crossing(occ: &[u8]) {
+    let occ_slots: Vec<u8> = occ.iter().copied().filter(|&l| l != EMPTY).collect();
+    for i in 0..occ_slots.len() {
+        for j in (i + 1)..occ_slots.len() {
+            if occ_slots[i] == occ_slots[j] {
+                continue;
+            }
+            for k in (j + 1)..occ_slots.len() {
+                if occ_slots[k] != occ_slots[i] {
+                    continue;
+                }
+                for m in (k + 1)..occ_slots.len() {
+                    debug_assert!(
+                        occ_slots[m] != occ_slots[j],
+                        "crossing partition {occ_slots:?} — scan model violated"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `legacy::enumerate(center, n)` recomputed by the connectivity-signature
+/// transfer matrix (DESIGN §4.7). `n > 0`; cell needs `n%4 ∈ {0,1}`, vertex
+/// needs `4|n` — caller-enforced (`count_transfer`), as in §3.3.
+pub(crate) fn count_phase3(center: Center, n: usize) -> u64 {
+    debug_assert!(n > 0);
+    let nn = n as u32;
+    let apex_forced = center == Center::Cell && n % 4 == 1;
+    let apex_forbidden = center == Center::Cell && n % 4 == 0;
+    let max_d = max_scan_d(n);
+
+    let mut map: std::collections::HashMap<Frontier, u64> = std::collections::HashMap::new();
+    map.insert(
+        Frontier {
+            occ: vec![],
+            cx: vec![],
+            cd: vec![],
+            w: 0,
+        },
+        1,
+    );
+    let mut accepted: u64 = 0;
+
+    for d in 0..=max_d {
+        let len_d = antidiag_len(d);
+        let mut next: std::collections::HashMap<Frontier, u64> = std::collections::HashMap::new();
+
+        for (prev, &mult) in &map {
+            // Recurse over slot occupancy for anti-diagonal d, pruning on
+            // weight; finalize each full assignment.
+            let mut cur = vec![false; len_d];
+            // Stack-free explicit recursion via a helper closure is awkward in
+            // Rust; use an inner recursive fn over an index.
+            #[allow(clippy::too_many_arguments)]
+            fn rec(
+                y: usize,
+                len_d: usize,
+                d: i32,
+                center: Center,
+                nn: u32,
+                apex_forced: bool,
+                apex_forbidden: bool,
+                cur: &mut Vec<bool>,
+                run_w: u32,
+                prev: &Frontier,
+                mult: u64,
+                accepted: &mut u64,
+                next: &mut std::collections::HashMap<Frontier, u64>,
+            ) {
+                if run_w > nn {
+                    return; // weight monotone ⇒ subtree dead
+                }
+                if y == len_d {
+                    finalize(d, len_d, center, nn, cur, prev, mult, accepted, next);
+                    return;
+                }
+                let cell = cell_at(d, y as i32);
+                let is_apex = cell == (0, 0);
+                let w_cell = orbit_size(center, cell) as u32;
+
+                // empty branch (skip if the apex is forced occupied)
+                if !(is_apex && apex_forced) {
+                    cur[y] = false;
+                    rec(
+                        y + 1, len_d, d, center, nn, apex_forced, apex_forbidden, cur, run_w,
+                        prev, mult, accepted, next,
+                    );
+                }
+                // occupied branch (skip if the apex is forbidden)
+                if !(is_apex && apex_forbidden) {
+                    cur[y] = true;
+                    rec(
+                        y + 1,
+                        len_d,
+                        d,
+                        center,
+                        nn,
+                        apex_forced,
+                        apex_forbidden,
+                        cur,
+                        run_w + w_cell,
+                        prev,
+                        mult,
+                        accepted,
+                        next,
+                    );
+                    cur[y] = false;
+                }
+            }
+
+            rec(
+                0,
+                len_d,
+                d,
+                center,
+                nn,
+                apex_forced,
+                apex_forbidden,
+                &mut cur,
+                prev.w,
+                prev,
+                mult,
+                &mut accepted,
+                &mut next,
+            );
+        }
+        map = next;
+    }
+
+    // Scan end: a surviving state is a valid slice iff exactly one component,
+    // weight n, both edges. (Earlier-retiring sole components were already
+    // resolved and removed.)
+    for (st, &mult) in &map {
+        if st.cx.len() == 1 && st.w == nn && st.cx[0] && st.cd[0] {
+            accepted += mult;
+        }
+    }
+    accepted
+}
+
+/// Process one full anti-diagonal occupancy `cur`: compute components from the
+/// backward links into `prev`, apply the retirement rule (accept the sole
+/// completing component, or drop a severed branch), else emit the canonical
+/// next frontier with `mult`.
+#[allow(clippy::too_many_arguments)]
+fn finalize(
+    d: i32,
+    len_d: usize,
+    center: Center,
+    nn: u32,
+    cur: &[bool],
+    prev: &Frontier,
+    mult: u64,
+    accepted: &mut u64,
+    next: &mut std::collections::HashMap<Frontier, u64>,
+) {
+    let mut w = prev.w;
+    for (y, &on) in cur.iter().enumerate() {
+        if on {
+            w += orbit_size(center, cell_at(d, y as i32)) as u32;
+        }
+    }
+    if w > nn {
+        return;
+    }
+    let ncomp = prev.cx.len();
+    let occ_slots: Vec<usize> = (0..len_d).filter(|&y| cur[y]).collect();
+    let mut uf = Uf::new(ncomp + occ_slots.len());
+    let mut ref_old = vec![false; ncomp];
+
+    for (j, &y) in occ_slots.iter().enumerate() {
+        let x = d - y as i32;
+        let slot_node = ncomp + j;
+        // backward A = (x−1, y) on d−1 slot y, in-wedge iff x>y
+        if x > y as i32 && y < prev.occ.len() && prev.occ[y] != EMPTY {
+            let o = prev.occ[y] as usize;
+            uf.union(o, slot_node);
+            ref_old[o] = true;
+        }
+        // backward B = (x, y−1) on d−1 slot y−1, in-wedge iff y≥1
+        if y >= 1 && (y - 1) < prev.occ.len() && prev.occ[y - 1] != EMPTY {
+            let o = prev.occ[y - 1] as usize;
+            uf.union(o, slot_node);
+            ref_old[o] = true;
+        }
+    }
+
+    let retired_any = (0..ncomp).any(|o| !ref_old[o]);
+    if retired_any {
+        // Legal sole completion ⟺ exactly one old component and nothing on d
+        // (so it is unreferenced and no new component is started).
+        if ncomp == 1 && occ_slots.is_empty() {
+            if prev.w == nn && prev.cx[0] && prev.cd[0] {
+                *accepted += mult;
+            }
+            return; // resolved
+        }
+        return; // a piece is severed ⇒ ≥2 components ⇒ dead
+    }
+
+    // All old components continue. Build the canonical next frontier.
+    let mut root_to_canon: std::collections::HashMap<usize, u8> = std::collections::HashMap::new();
+    let mut cx: Vec<bool> = Vec::new();
+    let mut cd: Vec<bool> = Vec::new();
+    let mut occ_lbl = vec![EMPTY; len_d];
+    for (j, &y) in occ_slots.iter().enumerate() {
+        let r = uf.find(ncomp + j);
+        let canon = *root_to_canon.entry(r).or_insert_with(|| {
+            let id = cx.len() as u8;
+            cx.push(false);
+            cd.push(false);
+            id
+        });
+        occ_lbl[y] = canon;
+    }
+    for o in 0..ncomp {
+        let r = uf.find(o);
+        if let Some(&canon) = root_to_canon.get(&r) {
+            cx[canon as usize] |= prev.cx[o];
+            cd[canon as usize] |= prev.cd[o];
+        }
+    }
+    for (j, &y) in occ_slots.iter().enumerate() {
+        let r = uf.find(ncomp + j);
+        let canon = root_to_canon[&r] as usize;
+        let cell = cell_at(d, y as i32);
+        cx[canon] |= on_x_axis_edge(cell);
+        cd[canon] |= on_diagonal_edge(cell);
+    }
+    #[cfg(debug_assertions)]
+    assert_non_crossing(&occ_lbl);
+
+    *next
+        .entry(Frontier {
+            occ: occ_lbl,
+            cx,
+            cd,
+            w,
+        })
+        .or_insert(0) += mult;
+}
+
+/// `a(n)` for A142886 via the transfer matrix — same public contract and
+/// residue/center dispatch as `legacy::count` (§3.3); the GO swap repoints
+/// `mod.rs`'s `pub use` here.
+pub(crate) fn count(n: usize) -> crate::Count {
+    if n == 0 {
+        return 1;
+    }
+    if n % 4 == 2 || n % 4 == 3 {
+        return 0;
+    }
+    count_phase3(Center::Cell, n) + count_vertex_centered(n)
+}
+
+/// Cell-centered contribution (≈ A351127); see `legacy::count_cell_centered`.
+pub(crate) fn count_cell_centered(n: usize) -> crate::Count {
+    if n == 0 {
+        return 1;
+    }
+    if n % 4 == 2 || n % 4 == 3 {
+        return 0;
+    }
+    count_phase3(Center::Cell, n)
+}
+
+/// Vertex-centered contribution (≈ A346800(n/4)); nonzero only when `4|n`.
+pub(crate) fn count_vertex_centered(n: usize) -> crate::Count {
+    if n == 0 || n % 4 != 0 {
+        return 0;
+    }
+    count_phase3(Center::Vertex, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +769,43 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    /// Phase 3 connectivity DP must be **byte-identical** to the proven
+    /// `legacy` engine — per center *and* total — for every feasible n in a
+    /// small range (the strong oracle; the deep sweep is Phase 4).
+    #[test]
+    fn phase3_byte_identical_to_legacy_small_n() {
+        for n in 0usize..=24 {
+            assert_eq!(
+                super::count(n),
+                legacy::count(n),
+                "count mismatch at n={n}"
+            );
+            assert_eq!(
+                count_cell_centered(n),
+                legacy::count_cell_centered(n),
+                "cell mismatch at n={n}"
+            );
+            assert_eq!(
+                count_vertex_centered(n),
+                legacy::count_vertex_centered(n),
+                "vertex mismatch at n={n}"
+            );
+        }
+    }
+
+    /// The named §3.4 hand cases, through the transfer engine directly.
+    #[test]
+    fn phase3_named_shapes() {
+        assert_eq!(super::count(0), 1); // empty (convention)
+        assert_eq!(super::count(1), 1); // monomino
+        assert_eq!(super::count(4), 1); // 2×2 (vertex)
+        assert_eq!(super::count(5), 1); // X-pentomino
+        assert_eq!(super::count(8), 1); // 3×3 ring
+        assert_eq!(super::count(9), 2); // 3×3 solid + arm-2 plus
+        assert_eq!(count_vertex_centered(4), 1);
+        assert_eq!(count_cell_centered(4), 0);
+        assert_eq!(count_cell_centered(9), 2);
     }
 }

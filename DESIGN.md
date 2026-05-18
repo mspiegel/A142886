@@ -553,12 +553,14 @@ fn diff_legacy() {
 }
 ```
 
-**M6 status.** *Bring-up, gated.* Phases 1 (anti-diagonal scaffolding) and 2
-(the `(weight, edge-flags)` knapsack DP — a brute-validated over-count of
-`legacy`, connectivity deliberately omitted) landed in
-`src/enumerate/transfer.rs`; `legacy` stays the live engine so the crate is
-green at every commit. Phases 3 (connectivity signature) → 4 (differential
-gate) → 5 follow. **GO** (transfer
+**M6 status.** *Bring-up, gated.* Phases 1–3 landed in
+`src/enumerate/transfer.rs`: anti-diagonal scaffolding; the
+`(weight, edge-flags)` knapsack; and the connectivity-signature DP
+(backward-link union–find, canonical non-crossing partition, the
+sole-completion retirement rule). The Phase-3 engine is **byte-identical to
+`legacy`** (count + cell + vertex) for every feasible n ≤ 24. `legacy` stays
+the live engine so the crate is green at every commit. Phases 4 (deep
+differential gate + §4.1 forced-slice oracle) → 5 follow. **GO** (transfer
 byte-identical to `legacy` for all feasible n and matching the b-file past
 n≈110): `transfer` becomes the sole engine, `legacy` is deleted in the same
 commit, `verify::DEEP_BOUND` 68→163. **NO-GO** (unresolved mismatch, or state

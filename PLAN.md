@@ -174,9 +174,12 @@ shipped coexisting variant).
       yet — proven to over-count `legacy` per center (n≤40) and byte-exact
       vs a brute subset oracle over the same bounded region (n∈{1,4,5,8,9},
       cell+vertex).
-- [ ] **Phase 3 — connectivity signature.** Jensen non-crossing partition:
-      merge + re-canonicalize, component-death rule, flag carry on
-      retirement. Debug-assert canonical form / monotone weight / width ≤ 64.
+- [x] **Phase 3 — connectivity signature.** Anti-diagonal Jensen DP:
+      backward-link union–find, canonical (non-crossing) partition, the
+      retirement rule (sole component completes ⇒ resolve; any other
+      retirement ⇒ severed ⇒ drop), edge-flag carry on merge. Debug-asserts
+      non-crossing. **Byte-identical to `legacy`** (count + cell + vertex)
+      for all feasible n ≤ 24; §3.4 named shapes pass through it.
 - [ ] **Phase 4 — differential gate.** `#[ignore]` `diff_legacy`:
       `transfer::` == `legacy::` byte-identical (cell/vertex/sum) every
       feasible n ≡ 0,1 mod 4 up to `DIFF_BOUND` (68 → 100–108); forced-slice
