@@ -43,3 +43,23 @@ _No deferred work is currently parked._
   shipped x-axis-rooted scheme above. See DESIGN §4.5.
 - **Transfer/kernel reformulation — rejected** (its per-node state
   bookkeeping outweighs the branching it removes; DESIGN §4.5).
+- **Column-span / horizontal-extent reach bound — refuted analytically
+  (identically 0; not implemented).** Idea: `max`-combine an extra
+  admissible term `4·(columns that must be newly occupied to reach the
+  diagonal)` with `8·min_gap−4`. An admissible bound must be ≤ the *minimum*
+  extra weight over *all* valid completions. From the min-gap cell `(x0,y0)`
+  a completion can **always** land the diagonal at a column `≤` the current
+  `max_x`: if `y0≥1` walk `x` down to `(y0,y0)` (interior, never forbidden);
+  if `y0=0` the x-axis route is forbidden so walk `y` up to `(x0,x0)`,
+  `x0 ≤ ax ≤ max_x` — then fill weight `n` with interior cells in existing
+  columns. So *some* completion adds **0** new columns ⇒ the only admissible
+  column term is `0` ⇒ it can never prune. Any nonzero variant is
+  inadmissible (would change counts). Stronger than a measured wash — a
+  proof — so no implement/benchmark cycle was spent. This was the lone
+  un-refuted single-core candidate; with it refuted the **single-core,
+  count-preserving optimization ledger is closed**: #nodes is bounded by the
+  residue/bucket split + the *provably exact* diagonal-reach bound, per-node
+  cost is irreducible inlined work, and every structural reformulation is
+  rejected above. The only remaining lever is **`rayon` over the ~`n`
+  independent buckets** (parallelism — count-preserving, not single-core);
+  beyond that the honest path to more terms is more compute, not algorithm.
