@@ -63,3 +63,26 @@ _No deferred work is currently parked._
   rejected above. The only remaining lever is **`rayon` over the ~`n`
   independent buckets** (parallelism — count-preserving, not single-core);
   beyond that the honest path to more terms is more compute, not algorithm.
+- **Redelmeier 1981 §6 size-reduction identity `HVADR2X(4p)=A'(p)`
+  (vertex part) — evaluated, Amdahl-rejected; identity retained as an
+  oracle.** Redelmeier's paper (read in full) gives `count_vertex_centered(4p)
+  = A'(p)` = #fixed polyominoes of size `p` with a LL-UR diagonal axis =
+  **OEIS A346800(p)** (this is A142886's own published formula,
+  `a(n)=A351127(n)+A346800(n/4)`; *not* novel). **Phase 1 validated**
+  `count_vertex_centered(4p) == A346800(p)` byte-identical for p=1..31
+  (n≤124), 0 mismatches — so the A346800 b-file (p≤66 ⇒ n≤264) is now a
+  usable independent cross-check oracle for the vertex part (cheap
+  `#[ignore]` test, like `matches_bfile`, if ever wanted). **Phase 2
+  gate failed:** the runtime split (n=116) is cell 12.42 s / vertex 1.79 s /
+  both 14.26 s — the vertex part is only ≈12.5 % of runtime (≈10–19 % of
+  `a(n)`). A diagonal A'(p) Redelmeier enumerator optimizes *only* vertex,
+  is the *same exponential base* (it produces exactly the same `A346800(p)`
+  accepted counts; ~1.5–3× constant edge at most from no §4.1 discard), so
+  best-realistic ≈1.05–1.09× overall (Amdahl ceiling ≈1.15× even if vertex
+  were free), with **reachable-n unchanged** (dominant ≈87 % cell part
+  untouched). Redelmeier's cell-centered (HVADR2I) handling is *filter-
+  based* — already inferior to our §4.1 lemma. A whole second enumerator
+  for a single-digit-%, non-asymptotic, Amdahl-capped gain is a poor trade
+  — not pursued. Confirms the ledger conclusion with hard numbers. (Also
+  noted in A346800: Jensen/Knuth transfer-matrix "by diagonals" — same
+  rejected class as DESIGN §4.5, not pursued.)
