@@ -95,7 +95,8 @@ and the §4.1 edge-condition cases (`{(3,1)}`, `{(2,1),(3,1)}`,
       `count = cell + vertex` (disjoint per §3.3, summed directly).
 - [x] §4.6 count-preserving prunes: residue-class bucket split (skip the
       dead parity's buckets — apex-only for `n ≡ 1`, apex-skipped for
-      `n ≡ 0`) and the admissible edge-reachability bound. Counts
+      `n ≡ 0`) and the admissible edge-reachability bound (joint
+      cell-budget+gap diagonal term `8·min_gap−4`; DESIGN §4.6(b)). Counts
       byte-identical to the §4.2 baseline (regression vs b-file + reference,
       n = 0..68); measured ≈40–95× speedup, growing with n.
 
@@ -135,8 +136,9 @@ correct table; `cargo run -- --verify` reports all-match on the prefix.
       `verify::DEEP_BOUND = 68`; absent b-file → skip, not fail.
 - [x] Measured release timing: pre-§4.6 n=60 ≈2.1 s, n=64 ≈4.0 s, n=68
       ≈10 s; post-§4.6 n=68 ≈0.11 s. Switching §4.2 to minimal-x-axis-cell
-      bucketing is a further ≈2× (n=100 2.72 s → 1.33 s, ratio non-eroding;
-      DESIGN §4.6 table); the full `0..=68` deep `--ignored` sweep is now
+      bucketing is a further ≈2×, and the §4.6(b) joint cell-budget+gap
+      diagonal term a further ≈1.33× (n=100 → ≈0.9 s, ratios non-eroding;
+      DESIGN §4.6 tables); the full `0..=68` deep `--ignored` sweep is now
       well under 0.1 s.
 
 **Achieved depth:** `count(n) == a(n)` verified for **n = 0..=68** against

@@ -380,24 +380,43 @@ minimal-x-axis-cell bucketing; nothing ever adds a separate "ring count" to
 correct against. (The cell-empty and vertex-centered counts, both at `n ≡ 0`, are
 summed without correction because their centroids differ — §3.3.)
 
-**(b) Edge-reachability bound (admissible prune for the ring case).** Track,
-over the current slice, `min_y` (smallest `y`) and `min_gap` (smallest
-`x − y`). If the x-axis edge is not yet touched, any connected addition
-reaching `y = 0` needs ≥ `min_y` new cells (one per unit step in `−y`);
-likewise ≥ `min_gap` new cells to reach the diagonal `x = y`. The two
-excursions may share cells, so the **sound** lower bound on new cells is
-`max(min_y′, min_gap′)` — never the sum (`max` cannot over-estimate, so it
-never prunes a branch that still admits a valid polyomino). Every new cell
-has orbit weight ≥ 4, giving
+**(b) Edge-reachability bound — single joint cell-budget + gap bound
+(admissible prune for the ring case).** Track, over the current slice,
+`min_y` (smallest `y`) and `min_gap` (smallest `x − y`). The two excursions
+(to `y = 0` and to `x = y`) may share cells, so the combined bound is the
+`max` of the two terms, never the sum.
+
+*x-axis term* (moot for the shipped A-rooted scheme — the pinned root is on
+the x-axis so it is always touched ⇒ 0; kept for the general lemma): if
+`y = 0` is not yet touched, reaching it needs ≥ `min_y` new cells, ≥ 4
+weight each.
+
+*Diagonal term.* If the diagonal is not yet touched (`td = 0`, equivalently
+`min_gap ≥ 1`), reaching it needs `min_gap` new cells — each 4-neighbour
+step changes `x − y` by ≤ 1, so the connecting chain hits every gap value
+`min_gap−1, …, 1, 0`. The cheap weight-4 route (run the x-axis to the
+origin) is **blocked by the canonical forbidden region**: every x-axis cell
+has gap `x ≥ ax ≥ min_gap` or is forbidden (`x < ax`), so no x-axis cell can
+*reduce* the gap. Hence each of the `min_gap − 1` gap-reducing cells is
+*interior* (orbit weight 8, not 4) and only the gap-0 landing is a weight-4
+diagonal cell — the exact (tightest admissible) minimum, for both centers:
 
 ```
-extra_weight_needed ≥ 4 · max( tx? 0 : min_y ,  td? 0 : min_gap )
+extra_weight_needed ≥ max( tx? 0 : 4·min_y ,  td? 0 : 8·min_gap − 4 )
 ```
 
-Prune the subtree when `weight + extra_weight_needed > n`. The quantity
-`weight + 4·max(…)` is non-decreasing down the recursion (weight rises ≥ 4
-per added cell while `min_y`/`min_gap` fall ≤ 1), so a node that exceeds `n`
-has every descendant exceed it — pruning the whole subtree is sound.
+(For `ax = 0` buckets — cell `n ≡ 1` apex / vertex 2×2 core — the root is on
+the diagonal ⇒ `td > 0` ⇒ the diagonal term is 0, unaffected.)
+
+Prune the subtree when `weight + extra_weight_needed > n`. **Soundness is
+per-node admissibility, not monotonicity.** The tightened `weight + LB` is
+*not* monotone down the recursion (the diagonal term can fall by 8 while
+`weight` rises only 4). It does not need to be: any valid weight-`n`
+completion must touch the diagonal, so its total `= weight + added ≥
+weight + LB`; if `weight + LB > n` *at this node* then every completion
+exceeds `n`, so the subtree holds no countable slice and the cut is sound —
+independently of any descendant's bound. Non-monotonicity only affects *how
+early* a doomed subtree is cut (performance), never correctness.
 
 **Measured effect of §4.6 (release, cumulative `--max-n`).** The speedup
 grows with `n` (the prune lowers the effective branching, not just a constant
@@ -428,6 +447,22 @@ further ≈2×, with a *non-eroding* ratio and byte-identical counts:
 
 The full `0..=68` `--ignored` regression sweep is well under 0.1 s. Still
 exponential (§4.5) — a constant-factor win, not a growth-class change.
+
+**Joint cell-budget + gap diagonal term vs the prior `4·min_gap` term (both
+on the x-axis-bucket scheme, release, cumulative `--max-n`, best of 3).**
+Tightening the diagonal term from `4·min_gap` to `8·min_gap − 4` is a
+further ≈1.33×, ratio non-eroding, counts byte-identical (n ≤ 100 vs the
+prior engine; n ≤ 68 vs b-file / `REFERENCE`):
+
+| n   | `4·min_gap` | joint `8·min_gap−4` | ratio |
+|-----|-------------|---------------------|-------|
+| 88  | 0.16 s      | 0.12 s              | 0.75  |
+| 100 | 1.24 s      | 0.93 s              | 0.75  |
+| 104 | 2.42 s      | 1.84 s              | 0.76  |
+| 108 | 4.79 s      | 3.64 s              | 0.76  |
+
+Pure node-count reduction at unchanged O(1) per-node cost (profile stays
+~100% self-time in `grow`); still exponential (§4.5).
 
 ## 5. Rust implementation sketch
 
@@ -478,8 +513,9 @@ regression (g).
 > enumerator visits all connected wedge slices of weight ≤ n, growing
 > exponentially: original debug-build cost ≈0.26 s at n=40, ≈1.2 s at n=48,
 > ≈17 s at n=60. The §4.6 prunes (count-preserving) cut this ≈40–95×
-> (release: n=68 from ≈10 s to ≈0.1 s), and switching the §4.2 scheme to
-> minimal-x-axis-cell bucketing is a further ≈2× (n=100 ≈1.3 s; the full
+> (release: n=68 from ≈10 s to ≈0.1 s), switching the §4.2 scheme to
+> minimal-x-axis-cell bucketing is a further ≈2×, and the §4.6(b) joint
+> cell-budget+gap diagonal term a further ≈1.33× (n=100 ≈0.9 s; the full
 > `0..=68` `--ignored` sweep well under 0.1 s) — still exponential, just a
 > much lower branching factor. The
 > *always-on* `cargo test` checks of the heavy `n ≡ 0,1 (mod 4)` cases remain

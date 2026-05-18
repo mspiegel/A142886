@@ -84,24 +84,49 @@ fn in_wedge(c: Cell) -> bool {
 
 /// Admissible lower bound on the *extra* orbit-weight any completion still
 /// needs in order to satisfy §4.1 condition 2 (touch both wedge edges).
+/// `min_y` = smallest `y`; `min_gap` = smallest `x − y` over the slice.
 ///
-/// `min_y` = the smallest `y` over the current slice; `min_gap` = the smallest
-/// `x − y`. If the x-axis edge is not yet touched (`tx == 0`) a connected
-/// addition reaching `y = 0` needs ≥ `min_y` new cells (one per unit step in
-/// `−y`); likewise ≥ `min_gap` new cells to reach the diagonal `x = y`. The
-/// two excursions may share cells, so the sound lower bound on *new cells* is
-/// `max` (never the sum — `max` cannot over-estimate, so it never prunes a
-/// branch that still admits a valid polyomino). Every new cell has orbit
-/// weight ≥ 4, hence the `4 *` factor.
+/// **x-axis term** (moot for the shipped A-rooted scheme — the pinned root
+/// is on the x-axis so `tx > 0` always ⇒ 0; kept for the general lemma): if
+/// `y = 0` is not yet touched, reaching it needs ≥ `min_y` new cells, ≥ 4
+/// weight each.
 ///
-/// `weight + edge_reach_lb(..) ` is non-decreasing down the recursion (weight
-/// rises ≥ 4 per added cell; `min_y`/`min_gap` fall ≤ 1), so a node that
-/// exceeds `n` has every descendant exceed it — the whole subtree is prunable.
+/// **Diagonal term — single joint cell-budget + gap bound.** If the
+/// diagonal is not yet touched (`td == 0` ⇔ `min_gap ≥ 1`), reaching it
+/// needs `min_gap` new cells (each 4-neighbour step changes `x − y` by ≤ 1,
+/// so the chain hits every gap value `min_gap−1, …, 1, 0`). The cheap
+/// weight-4 route — run along the x-axis to the origin — is **blocked by the
+/// forbidden region**: every x-axis cell has gap `x ≥ ax ≥ min_gap` (or is
+/// forbidden, `x < ax`), so it can never *reduce* the gap. Hence each of the
+/// `min_gap − 1` gap-reducing cells is interior (orbit weight 8, not 4) and
+/// only the gap-0 landing is a weight-4 diagonal cell:
+///
+/// ```text
+/// extra_weight ≥ 8·(min_gap − 1) + 4 = 8·min_gap − 4    (td == 0)
+/// ```
+///
+/// Exact (tightest admissible) for both centers (vertex: non-diagonal ⇒ 8,
+/// diagonal ⇒ 4; cell-centered: the only weight-1 cell `(0,0)` is
+/// x-axis-forbidden whenever this term is active, `ax ≥ 1`). For `ax = 0`
+/// buckets (cell `n ≡ 1` apex / vertex 2×2 core) the root is on the diagonal
+/// ⇒ `td > 0` ⇒ this term is 0.
+///
+/// The two excursions may share cells, so the sound combined bound is `max`,
+/// never the sum. **Soundness is per-node admissibility, not monotonicity:**
+/// `weight + edge_reach_lb` is *not* monotone down the recursion (the
+/// diagonal term can fall by 8 while `weight` rises only 4), but if
+/// `weight + lb > n` at a node then every completion's total
+/// `= weight + added ≥ weight + lb > n` (a valid slice must touch the
+/// diagonal), so the subtree holds no weight-`n` slice — independent of
+/// descendants. (DESIGN §4.6(b).)
 #[inline]
 fn edge_reach_lb(tx: u32, td: u32, min_y: i32, min_gap: i32) -> u64 {
-    let rx = if tx > 0 { 0 } else { min_y as u64 };
-    let rd = if td > 0 { 0 } else { min_gap as u64 };
-    4 * rx.max(rd)
+    // `td == 0` ⇒ no gap-0 cell ⇒ `min_gap ≥ 1`, so `8·min_gap − 4 ≥ 4`
+    // and the `u64` subtraction cannot underflow.
+    debug_assert!(td > 0 || min_gap >= 1, "td == 0 must imply min_gap ≥ 1");
+    let wx = if tx > 0 { 0 } else { 4 * min_y as u64 };
+    let wd = if td > 0 { 0 } else { 8 * (min_gap as u64) - 4 };
+    wx.max(wd)
 }
 
 #[inline]
