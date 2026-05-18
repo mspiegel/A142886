@@ -50,7 +50,7 @@ symmetry) as far as feasible, verified against the OEIS b-file
       wedge-edge tie-break, and an orbit-size classifier returning
       1 (apex) / 4 (x-axis or diagonal edge) / 8 (interior) per §3.1.
 - [ ] Vertex-centered: orbit + representative + classifier per §3.2
-      (diagonal cells `(i,i)` → size 4; others → size 8; 2×2 core seed).
+      (diagonal cells `(i,i)` → size 4; others → size 8; 2×2 core cell).
 
 **Acceptance:** test **(e)** `group_axioms_and_orbit_sizes` passes; orbit
 sizes equal the §3.1 / §3.2 tables for sampled apex/edge/interior cells.
@@ -62,7 +62,7 @@ sizes equal the §3.1 / §3.2 tables for sampled apex/edge/interior cells.
 - [ ] `slice_is_connected_polyomino(S) -> bool` = **(i)** `S` is one
       4-connected component (BFS or union–find over the wedge cells) **and**
       **(ii)** `S` has an occupied cell on the x-axis edge *and* one on the
-      diagonal edge (apex / 2×2-core seed satisfies both alone). This is the
+      diagonal edge (apex / 2×2-core cell satisfies both alone). This is the
       §4.1 lemma; the only acceptance test on the hot path.
 - [ ] Debug-only `reconstruct_then_bfs(S)`: `⋃_{g∈D₈} g·S`, assert
       `|P| == expected_n`, BFS connectivity — gated behind
@@ -78,10 +78,13 @@ and the §4.1 edge-condition cases (`{(3,1)}`, `{(2,1),(3,1)}`,
 
 *Design ref: §3, §4.2, §4.4, §7(b)(c)(d).* File: `src/enumerate.rs`.
 
-- [x] Redelmeier untried-set recursive growth restricted to `W`, seeded by
-      the slice's **minimum cell** in `(x,y)` lex order (each connected slice
-      has a unique minimum ⇒ generated once); per-seed `blocked` set carries
-      Redelmeier's ancestor-exclusion so no slice is double-counted.
+- [x] Redelmeier untried-set recursive growth restricted to `W`, **bucketed
+      by the slice's minimal x-axis cell** `A=(ax,0)` and grown from the
+      pinned root `A`; the per-bucket `blocked` set carries Redelmeier's
+      ancestor-exclusion, so injectivity holds *without* the old global
+      lex-min `nb>seed` shortcut and each valid slice is generated in
+      exactly one bucket exactly once (DESIGN §4.2; ≈2× faster than the
+      prior lex-min-seed scheme, counts byte-identical n≤100).
 - [x] Orbit-size accounting (§3.1 / §3.2) to track the reconstructed size
       and stop exactly at `n`; prune any branch whose weight exceeds `n`.
 - [x] Acceptance via the §4.1 edge-touch conditions on the slice
@@ -90,11 +93,11 @@ and the §4.1 edge-condition cases (`{(3,1)}`, `{(2,1),(3,1)}`,
       cell-centered drives `n ≡ 0,1`, vertex-centered only `n ≡ 0 (mod 4)`.
 - [x] Wire `count_cell_centered`, `count_vertex_centered`, and
       `count = cell + vertex` (disjoint per §3.3, summed directly).
-- [x] §4.6 count-preserving prunes: residue-class seed split (skip the dead
-      parity's seeds — apex-only for `n ≡ 1`, apex-skipped for `n ≡ 0`) and
-      the admissible edge-reachability bound. Counts byte-identical to the
-      §4.2 baseline (regression vs b-file + reference, n = 0..68); measured
-      ≈40–95× speedup, growing with n.
+- [x] §4.6 count-preserving prunes: residue-class bucket split (skip the
+      dead parity's buckets — apex-only for `n ≡ 1`, apex-skipped for
+      `n ≡ 0`) and the admissible edge-reachability bound. Counts
+      byte-identical to the §4.2 baseline (regression vs b-file + reference,
+      n = 0..68); measured ≈40–95× speedup, growing with n.
 
 **Acceptance:** tests **(b)** named shapes, **(c)** zero-pattern, **(d)**
 split-formula pass; the §3.4 hand cases n = 1,4,5,8,9 reproduce
@@ -131,16 +134,20 @@ correct table; `cargo run -- --verify` reports all-match on the prefix.
       (count vs b-file *and* b-file vs `REFERENCE`), bounded at
       `verify::DEEP_BOUND = 68`; absent b-file → skip, not fail.
 - [x] Measured release timing: pre-§4.6 n=60 ≈2.1 s, n=64 ≈4.0 s, n=68
-      ≈10 s; post-§4.6 n=60 ≈0.03 s, n=64 ≈0.05 s, n=68 ≈0.11 s. The full
-      `0..=68` deep `--ignored` sweep dropped from ≈15 s to ≈0.2 s.
+      ≈10 s; post-§4.6 n=68 ≈0.11 s. Switching §4.2 to minimal-x-axis-cell
+      bucketing is a further ≈2× (n=100 2.72 s → 1.33 s, ratio non-eroding;
+      DESIGN §4.6 table); the full `0..=68` deep `--ignored` sweep is now
+      well under 0.1 s.
 
 **Achieved depth:** `count(n) == a(n)` verified for **n = 0..=68** against
 both the OEIS b-file and the embedded `REFERENCE`, zero mismatches. `u64`
 empirically sufficient (a(161)=29 256 182 414 ≈ 2.9e10 ≪ u64::MAX). The
 remaining `69..=163` of the b-file is bounded only by the exponential
 enumeration (§4.5); reachable depth is empirical, not a fixed target. (A
-transfer/kernel reformulation was evaluated and was not faster once §4.6 was
-in place — see §4.5 — so it is not pursued.)
+transfer/kernel reformulation, and a two-terminal `(A,B)` variant pinning
+the minimal diagonal cell as well, were both evaluated and were not faster
+once §4.6 / x-axis bucketing was in place — see §4.5 — so neither is
+pursued.)
 
 **Acceptance:** `cargo test --release -- --ignored` matches the b-file to
 n=68 with zero mismatches — **met**.

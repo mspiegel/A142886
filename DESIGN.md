@@ -200,12 +200,13 @@ A polyomino must be a single edge-connected (4-neighbour) region. This does
 symmetry it reduces to a check on the wedge slice alone.
 
 **Lemma.** Let `S = P ∩ W` be the occupied wedge cells (including the
-apex / 2×2-core seed). `P` is a connected polyomino **iff**
+apex / 2×2-core cell). `P` is a connected polyomino **iff**
 
 1. `S` is a single 4-connected component, **and**
 2. `S` contains an occupied cell on the **x-axis edge** of `W` *and* an
-   occupied cell on the **diagonal edge** `y = x` (the apex/seed lies on
-   both edges simultaneously and satisfies this on its own).
+   occupied cell on the **diagonal edge** `y = x` (the apex / 2×2-core,
+   when present, lies on both edges simultaneously and satisfies this on
+   its own; the pinned root `A` always lies on the x-axis edge).
 
 **Sufficiency.** The 8 group images of `W` tile the plane as 8 octants in a
 cycle about the origin; consecutive octants share either an x-axis-type ray
@@ -239,16 +240,21 @@ as an optional debug assertion (§4.3), never on the hot path.
 
 Use Redelmeier's recursive cell-growth scheme (the canonical
 untried-neighbour enumeration that visits each shape exactly once without
-deduplication), adapted to the quotient:
+deduplication), adapted to the quotient and **bucketed by the slice's
+minimal x-axis cell**:
 
 ```
 For each center type (cell, vertex):
   For target size n with the right residue mod 4:
-    For each seed = the slice's lex-minimum cell:
-      Skip seeds of the dead parity (§4.6 residue split).
+    For each bucket = the slice's minimal x-axis cell A = (ax, 0):
+      Skip buckets of the dead parity (§4.6 residue split).
       Grow an occupancy set restricted to W, cell by cell, from the
-      seed, using Redelmeier's "untried set" frontier so each wedge
-      configuration is generated exactly once.
+      pinned root A, using Redelmeier's "untried set" frontier with the
+      blocked-set (ancestor-exclusion) discipline, so each connected
+      slice containing A is generated exactly once.
+      Forbid adding any x-axis cell strictly left of A (so A is the
+      slice's canonical minimal x-axis cell ⇒ each valid slice falls in
+      exactly one bucket).
       When the orbit-size accounting (§3) totals exactly n cells:
         accept iff S is 4-connected AND S touches both wedge edges (§4.1).
         (no reconstruction; the §4.1 lemma makes this exact)
@@ -262,11 +268,29 @@ running count is exact with no canonical-form pass and no Burnside sum.
 The two extra prunes (§4.6) only delete provably-empty subtrees, so the
 count is unchanged.
 
+**Why bucket by the minimal x-axis cell.** Every valid slice touches the
+x-axis (§4.1), so its minimal x-axis cell `A` is well-defined; the
+forbid-left-of-`A` rule makes `A` the slice's unique canonical
+representative, and injectivity *within* a bucket is the standard
+fixed-root Redelmeier blocked-set theorem (it does **not** need a
+lex-ordering shortcut). An earlier scheme instead keyed on the slice's
+*global lex-minimum cell* and grew only to strictly-greater cells
+(`nb > seed`). That `nb > seed` shortcut has no cheap analog for an
+edge-pinned root and is dropped; nevertheless, with the §4.6 prunes the
+x-axis-rooted bucketing is **measured ≈2× faster** than the lex-min-seed
+scheme at n = 72..104, counts byte-identical (n ≤ 100 vs the prior
+scheme; n ≤ 68 vs the b-file and embedded reference). The reason: there
+are only `≈n` x-axis roots versus `≈n²/2` lex-min seeds, and the
+blocked-set discipline plus the x-axis forbid more than compensate for
+the lost `nb > seed` pruning. A two-terminal `(A,B)` variant that also
+pins the minimal diagonal cell was evaluated and rejected — see §4.5.
+
 ### 4.3 Connectivity test
 
 Hot path: the §4.1 predicate on the slice `S` — (i) `S` is one 4-connected
 component (BFS/union–find over the ≈ n/8 occupied wedge cells, `(i32,i32)`),
-and (ii) `S` has an occupied cell with `y = 0` and one with `y = x` (apex/seed
+and (ii) `S` has an occupied cell with `y = 0` and one with `y = x` (the
+pinned root `A` gives (i)-half for free; the apex/2×2-core, when present,
 satisfies both). O(|S|); no `P` materialized.
 
 Debug only: `reconstruct(S) = ⋃_{g ∈ D₈} g·S`, then assert `|P| == n` and that
@@ -299,18 +323,29 @@ bounded frontier state carrying the connectivity signature — was evaluated as
 the route to polynomial-per-term depth. In practice it was **not faster** than
 the §4.6-pruned enumerator at the depths of interest (its per-node state
 bookkeeping outweighed the branching it removed once §4.6 was in place), so it
-is not pursued and is intentionally absent from the plan. The shipped
-algorithm is the §4.2 Redelmeier enumeration with the §4.6 prunes; greater
+is not pursued and is intentionally absent from the plan.
+
+A **two-terminal `(A,B)` variant** was also evaluated: pin *both* the minimal
+x-axis cell `A` and the minimal diagonal cell `B = (bx, bx)`, bucket by the
+pair `(A, B)`, and accept iff `B ∈ S` (making the §4.1 both-edges condition
+hold by construction rather than by a generate-then-reject filter). It is
+*correct* (byte-identical n ≤ 68) but **≈O(n) slower**: a slice whose true
+minimal-diagonal cell is `(D, D)` is fully grown and then rejected in every
+bucket `bx = 0..D-1` and counted only in `bx = D`, an `≈n`-fold redundant
+re-exploration that compounds with `n` (profiled ≥ 50× slower at n = 88). It
+is rejected; dropping the `B` dimension entirely recovers the shipped
+§4.2 x-axis-rooted scheme. The shipped algorithm is the §4.2 Redelmeier
+enumeration bucketed by the minimal x-axis cell with the §4.6 prunes; greater
 depth comes from running it longer, not from an algorithm swap.
 
-### 4.6 Residue-class seed split and edge-reachability pruning
+### 4.6 Residue-class bucket split and edge-reachability pruning
 
 Two exact, count-preserving prunes sit on top of the §4.2 baseline. Both
 only delete subtrees that provably contribute zero, so every `count(n)` is
 byte-identical to §4.2 (regression-checked n = 0..68 against the b-file and
 the embedded reference).
 
-**(a) Residue-class seed split (the "path-vs-ring" decomposition).** From
+**(a) Residue-class bucket split (the "path-vs-ring" decomposition).** From
 §3.1 a cell-centered slice has weight `c + 4e + 8i` with `c ∈ {0,1}` the apex
 bit, so
 
@@ -319,28 +354,30 @@ slice contains the apex (0,0)   ⟺   weight ≡ 1 (mod 4)
 slice omits the apex            ⟺   weight ≡ 0 (mod 4)
 ```
 
-and since `(0,0)` is the global lex-minimum, "contains the apex" ⟺ "seed is
-`(0,0)`". For a fixed target `n` only one parity can ever sum to `n`, so:
+and since `(0,0)` is the only `x = 0` wedge cell, "contains the apex" ⟺
+"the slice's minimal x-axis cell is `(0,0)`" ⟺ "the `ax = 0` bucket". For a
+fixed target `n` only one parity can ever sum to `n`, so:
 
 - **n ≡ 1 (mod 4) — center occupied ("a path out from the center").**
-  Every counted slice contains the apex, hence has seed `(0,0)`; *every other
-  seed's entire Redelmeier subtree is provably empty* and is skipped. The
-  apex lies on both wedge edges, so §4.1 condition 2 is satisfied for free —
-  the rest of the slice is unconstrained by it (it may touch zero, one, or
-  both edges) and acceptance reduces to "weight == n".
+  Every counted slice contains the apex, hence lies in the `ax = 0` bucket;
+  *every other bucket's entire Redelmeier subtree is provably empty* and is
+  skipped. The apex lies on both wedge edges, so §4.1 condition 2 is
+  satisfied for free — the rest of the slice is unconstrained by it (it may
+  touch zero, one, or both edges) and acceptance reduces to "weight == n".
 - **n ≡ 0 (mod 4), cell-centered — center empty ("a ring from the x-axis
   edge to the diagonal edge").** No counted slice contains the apex, so the
-  `(0,0)` seed subtree (the single largest one) is skipped; condition 2 now
-  binds and is the operative filter.
-- **Vertex-centered** has no apex and is always `n ≡ 0`; every seed is live.
+  `ax = 0` bucket (the single largest one) is skipped; condition 2 now binds
+  and is the operative filter.
+- **Vertex-centered** has no apex and is always `n ≡ 0`; every bucket is
+  live (the `ax = 0` root is the size-4 2×2 core, an ordinary x-axis cell).
 
 These two cases are not merely separable, they are **mutually exclusive per
 `n`**: the residue of `n` mod 4 forces exactly one. So there is *no*
 "configurations that have both a center path and a ring" inclusion–exclusion
 term — it is identically zero. A center-occupied slice may itself wind into
 an annulus, but it is still one connected slice counted once by the
-minimum-cell discipline; nothing ever adds a separate "ring count" to correct
-against. (The cell-empty and vertex-centered counts, both at `n ≡ 0`, are
+minimal-x-axis-cell bucketing; nothing ever adds a separate "ring count" to
+correct against. (The cell-empty and vertex-centered counts, both at `n ≡ 0`, are
 summed without correction because their centroids differ — §3.3.)
 
 **(b) Edge-reachability bound (admissible prune for the ring case).** Track,
@@ -362,20 +399,35 @@ Prune the subtree when `weight + extra_weight_needed > n`. The quantity
 per added cell while `min_y`/`min_gap` fall ≤ 1), so a node that exceeds `n`
 has every descendant exceed it — pruning the whole subtree is sound.
 
-**Measured effect (release, cumulative `--max-n`).** The speedup grows with
-`n` (the prune lowers the effective branching, not just a constant factor):
+**Measured effect of §4.6 (release, cumulative `--max-n`).** The speedup
+grows with `n` (the prune lowers the effective branching, not just a constant
+factor); numbers for the original lex-min-seed §4.2 enumerator:
 
-| n  | §4.2 baseline | with §4.6 | speedup |
-|----|---------------|-----------|---------|
-| 56 | 0.83 s        | 0.02 s    | ≈ 40×   |
-| 60 | 2.13 s        | 0.03 s    | ≈ 70×   |
-| 64 | 4.03 s        | 0.05 s    | ≈ 80×   |
-| 68 | 10.44 s       | 0.11 s    | ≈ 95×   |
+| n  | §4.2 (un-pruned) | with §4.6 | speedup |
+|----|------------------|-----------|---------|
+| 56 | 0.83 s           | 0.02 s    | ≈ 40×   |
+| 60 | 2.13 s           | 0.03 s    | ≈ 70×   |
+| 64 | 4.03 s           | 0.05 s    | ≈ 80×   |
+| 68 | 10.44 s          | 0.11 s    | ≈ 95×   |
 
-The full `0..=68` `--ignored` regression sweep drops from ≈15 s to ≈0.2 s.
 This is a large constant/branching improvement, not an asymptotic change: the
 wedge enumeration is still exponential (§4.5), so this lowers the constant and
 pushes the reachable `n` out without changing the growth class.
+
+**Minimal-x-axis-cell bucketing vs the prior lex-min-seed scheme (both with
+§4.6, release, cumulative `--max-n`, best of 3).** Switching the §4.2
+enumeration scheme (see §4.2 "Why bucket by the minimal x-axis cell") is a
+further ≈2×, with a *non-eroding* ratio and byte-identical counts:
+
+| n   | lex-min seed | x-axis bucket | ratio |
+|-----|--------------|---------------|-------|
+| 72  | 0.03 s       | 0.01 s        | 0.33  |
+| 88  | 0.37 s       | 0.17 s        | 0.46  |
+| 100 | 2.72 s       | 1.33 s        | 0.49  |
+| 104 | 5.29 s       | 2.61 s        | 0.49  |
+
+The full `0..=68` `--ignored` regression sweep is well under 0.1 s. Still
+exponential (§4.5) — a constant-factor win, not a growth-class change.
 
 ## 5. Rust implementation sketch
 
@@ -425,9 +477,11 @@ regression (g).
 > **Baseline runtime note (measured, M3; updated for §4.6).** The §4.2
 > enumerator visits all connected wedge slices of weight ≤ n, growing
 > exponentially: original debug-build cost ≈0.26 s at n=40, ≈1.2 s at n=48,
-> ≈17 s at n=60. The §4.6 prunes (count-preserving) cut this ≈40–95× (release:
-> n=68 from ≈10 s to ≈0.1 s; the full `0..=68` `--ignored` sweep from ≈15 s to
-> ≈0.2 s) — still exponential, just a much lower branching factor. The
+> ≈17 s at n=60. The §4.6 prunes (count-preserving) cut this ≈40–95×
+> (release: n=68 from ≈10 s to ≈0.1 s), and switching the §4.2 scheme to
+> minimal-x-axis-cell bucketing is a further ≈2× (n=100 ≈1.3 s; the full
+> `0..=68` `--ignored` sweep well under 0.1 s) — still exponential, just a
+> much lower branching factor. The
 > *always-on* `cargo test` checks of the heavy `n ≡ 0,1 (mod 4)` cases remain
 > bounded at **n ≤ 40** (constant `HEAVY_BOUND`) and the reference-vector
 > always-on tier at `0..=40`; after §4.6 this is a comfortable safety margin

@@ -4,13 +4,17 @@
 //! Milestone **M3** (PLAN.md). DESIGN.md §3, §4.2, §4.4.
 //!
 //! A D8-symmetric polyomino of `n` cells is in bijection with its wedge slice
-//! `S ⊆ W` (DESIGN.md §2). We enumerate connected wedge slices, keyed by
-//! their minimum cell (a fixed `(x,y)` lexicographic order) so each slice is
-//! generated exactly once (Redelmeier's discipline). The reconstructed size
-//! is `Σ_{c∈S} orbit_size(c)` (orbits are disjoint), and by the §4.1 lemma
-//! the polyomino is connected iff `S` is one 4-connected component touching
-//! both wedge edges — Redelmeier growth keeps `S` connected by construction,
-//! so only the edge-touch check remains.
+//! `S ⊆ W` (DESIGN.md §2). By the §4.1 lemma the polyomino is connected iff
+//! `S` is one 4-connected component touching both wedge edges (`y = 0` and
+//! `x = y`); Redelmeier growth keeps `S` connected by construction, so only
+//! the edge-touch check remains. We bucket the valid slices by their minimal
+//! x-axis cell `A = (ax, 0)` and Redelmeier-grow each bucket from the pinned
+//! root `A` under the blocked-set discipline, forbidding any x-axis cell
+//! strictly left of `A`. Injectivity is the standard fixed-root blocked-set
+//! theorem — the baseline's global lex-min `nb > seed` shortcut is
+//! deliberately dropped (it has no cheap analog for an edge-pinned root; the
+//! known performance trade — see the plan's O2 note). The reconstructed size
+//! is `Σ_{c∈S} orbit_size(c)` (orbits are disjoint).
 
 use crate::symmetry::{orbit_size, Cell, Center};
 use crate::Count;
@@ -110,6 +114,17 @@ fn on_diagonal_edge(c: Cell) -> bool {
     c.0 == c.1
 }
 
+/// Is `c` an x-axis cell strictly left of the pinned root `A = (ax, 0)`?
+/// Banning it makes `A` the slice's canonical minimal x-axis cell, so the
+/// buckets partition the valid slices (this replaces the baseline's
+/// `nb > seed` lex-min canonicalisation; injectivity itself comes from the
+/// blocked-set discipline, which is unaffected — a forbidden cell is never
+/// enqueued, hence never blocked or unwound).
+#[inline]
+fn forbidden(c: Cell, ax: i32) -> bool {
+    c.1 == 0 && c.0 < ax
+}
+
 const NEIGHBOURS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
 /// Count D8-symmetric polyominoes of `n` cells for one center type, by
@@ -126,88 +141,94 @@ fn enumerate(center: Center, n: usize) -> Count {
     let xmax = n as i32;
     let mut total: Count = 0;
 
-    // Residue-based seed restriction (DESIGN.md §3.1). A cell-centered slice
-    // has weight `c + 4e + 8i` with `c ∈ {0,1}` the apex bit, so its weight
-    // is ≡ 1 (mod 4) iff it contains the apex `(0,0)` and ≡ 0 otherwise.
-    // Hence for the target residue, all slices of the *other* parity have
-    // weight that can never equal `n` — their entire Redelmeier subtree is
-    // provably empty. Since `(0,0)` is the global lex-minimum, "contains the
-    // apex" ⟺ "seed is `(0,0)`", so we skip the dead seeds outright:
-    //   n ≡ 1 (mod 4): center occupied — only the apex seed produces n.
-    //   n ≡ 0 (mod 4): center empty (the "ring") — the apex seed produces
+    // Residue-based bucket restriction (DESIGN.md §3.1). A cell-centered
+    // slice has weight `c + 4e + 8i` with `c ∈ {0,1}` the apex bit, so its
+    // weight is ≡ 1 (mod 4) iff it contains the apex `(0,0)` and ≡ 0
+    // otherwise. Hence for the target residue, all slices of the *other*
+    // parity have weight that can never equal `n` — their entire Redelmeier
+    // subtree is provably empty. `(0,0)` is the only `x = 0` wedge cell, so a
+    // slice contains the apex iff its minimal x-axis cell is `(0,0)`, i.e.
+    // iff `ax == 0`; skip the dead buckets outright:
+    //   n ≡ 1 (mod 4): center occupied — only the apex bucket produces n.
+    //   n ≡ 0 (mod 4): center empty (the "ring") — the apex bucket produces
     //                  only n ≡ 1, so skip it.
-    // (Vertex-centered has no apex; `n` is always ≡ 0 and every seed is live.)
+    // (Vertex-centered has no apex; `n` is always ≡ 0 and every bucket live.)
     let apex_required = center == Center::Cell && n % 4 == 1;
     let apex_forbidden = center == Center::Cell && n % 4 == 0;
 
-    // Iterate the slice's minimum cell in (x, y) lexicographic order; for
-    // each, Redelmeier-grow using only strictly-greater wedge cells. Each
-    // connected slice has a unique minimum, so it is counted exactly once.
-    for sx in 0..=xmax {
-        for sy in 0..=sx {
-            let seed = (sx, sy);
-            let is_apex = center == Center::Cell && seed == (0, 0);
-            if apex_required && !is_apex {
-                continue; // dead parity: weight ≡ 0 (mod 4) ≠ n
-            }
-            if apex_forbidden && is_apex {
-                continue; // dead parity: weight ≡ 1 (mod 4) ≠ n
-            }
-            let ws = orbit_size(center, seed) as u64;
-            if ws > n {
-                continue;
-            }
-            let tx = u32::from(on_x_axis_edge(seed));
-            let td = u32::from(on_diagonal_edge(seed));
-            if ws == n {
-                if tx > 0 && td > 0 {
-                    total += 1;
-                }
-                continue; // any extension exceeds n
-            }
-            // Edge-reachability prune (the "ring" case): if even the
-            // cheapest completion cannot touch both wedge edges within the
-            // budget, this seed's whole subtree is dead (§4.1 condition 2).
-            if ws + edge_reach_lb(tx, td, sy, sx - sy) > n {
-                continue;
-            }
-            // All four scratch structures are allocated once per seed and
-            // reused across the seed's entire recursion subtree (push/truncate,
-            // never a per-node `Vec`): `p` = slice membership, `blocked` =
-            // Redelmeier exclusion set, `untried` = the shared growth buffer,
-            // `in_untried` = O(1) membership of `untried`, `blk_unwind` = the
-            // stack recording which cells each level added to `blocked`.
-            let mut p = CellSet::new(xmax);
-            p.insert(seed);
-            let mut blocked = CellSet::new(xmax);
-            let mut untried: Vec<Cell> = Vec::new();
-            let mut in_untried = CellSet::new(xmax);
-            let mut blk_unwind: Vec<Cell> = Vec::new();
-            for (dx, dy) in NEIGHBOURS {
-                let nb = (seed.0 + dx, seed.1 + dy);
-                if in_wedge(nb) && nb.0 <= xmax && nb > seed && in_untried.insert(nb) {
-                    untried.push(nb);
-                }
-            }
-            grow(
-                center,
-                n,
-                seed,
-                xmax,
-                &mut p,
-                ws,
-                tx,
-                td,
-                sy,
-                sx - sy,
-                0,
-                &mut untried,
-                &mut in_untried,
-                &mut blocked,
-                &mut blk_unwind,
-                &mut total,
-            );
+    // Partition the valid slices by their minimal x-axis cell `A = (ax, 0)`.
+    // Every valid slice touches the x-axis (§4.1), so `A` is well-defined;
+    // Redelmeier-grow each bucket from the pinned root `A` under the
+    // blocked-set discipline, forbidding any x-axis cell strictly left of
+    // `A` (so `A` is the unique canonical representative ⇒ each slice is
+    // generated in exactly one bucket, counted exactly once). The variable
+    // is still named `seed` (== `(ax, 0)`) so the rest of the recursion is
+    // unchanged.
+    for ax in 0..=xmax {
+        let seed = (ax, 0);
+        let is_apex = center == Center::Cell && ax == 0;
+        if apex_required && !is_apex {
+            continue; // dead parity: weight ≡ 0 (mod 4) ≠ n
         }
+        if apex_forbidden && is_apex {
+            continue; // dead parity: weight ≡ 1 (mod 4) ≠ n
+        }
+        let ws = orbit_size(center, seed) as u64;
+        if ws > n {
+            continue;
+        }
+        let tx = u32::from(on_x_axis_edge(seed));
+        let td = u32::from(on_diagonal_edge(seed));
+        if ws == n {
+            if tx > 0 && td > 0 {
+                total += 1;
+            }
+            continue; // any extension exceeds n
+        }
+        // Edge-reachability prune (the "ring" case): if even the cheapest
+        // completion cannot touch both wedge edges within the budget, this
+        // bucket's whole subtree is dead (§4.1 condition 2). `A` is on the
+        // x-axis so only the diagonal term (min_gap = ax) can bind.
+        if ws + edge_reach_lb(tx, td, seed.1, seed.0 - seed.1) > n {
+            continue;
+        }
+        // All four scratch structures are allocated once per bucket and
+        // reused across the bucket's entire recursion subtree
+        // (push/truncate, never a per-node `Vec`): `p` = slice membership,
+        // `blocked` = Redelmeier exclusion set, `untried` = the shared
+        // growth buffer, `in_untried` = O(1) membership of `untried`,
+        // `blk_unwind` = the stack recording which cells each level added to
+        // `blocked`.
+        let mut p = CellSet::new(xmax);
+        p.insert(seed);
+        let mut blocked = CellSet::new(xmax);
+        let mut untried: Vec<Cell> = Vec::new();
+        let mut in_untried = CellSet::new(xmax);
+        let mut blk_unwind: Vec<Cell> = Vec::new();
+        for (dx, dy) in NEIGHBOURS {
+            let nb = (seed.0 + dx, seed.1 + dy);
+            if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) && in_untried.insert(nb) {
+                untried.push(nb);
+            }
+        }
+        grow(
+            center,
+            n,
+            seed,
+            xmax,
+            &mut p,
+            ws,
+            tx,
+            td,
+            seed.1,
+            seed.0 - seed.1,
+            0,
+            &mut untried,
+            &mut in_untried,
+            &mut blocked,
+            &mut blk_unwind,
+            &mut total,
+        );
     }
     total
 }
@@ -284,7 +305,7 @@ fn grow(
                     let nb = (c.0 + dx, c.1 + dy);
                     if in_wedge(nb)
                         && nb.0 <= xmax
-                        && nb > seed
+                        && !forbidden(nb, seed.0)
                         && !p.contains(nb)
                         && !blocked.contains(nb)
                         && in_untried.insert(nb)
