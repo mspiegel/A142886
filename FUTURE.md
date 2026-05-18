@@ -5,20 +5,33 @@ re-raised in conversation.
 
 _No deferred work is currently parked._
 
-## In progress (gated, not parked)
-
-- **Transfer matrix reopened for n ≫ 110 — M6, gated bring-up.** The
-  transfer/kernel rejection below is *depth-conditioned* (n ≲ 110, a
-  constant-factor argument). The b-file reaches n=163 only as the OEIS
-  composition `a(n)=A351127(n)+A346800(n/4)` (DESIGN §3.3); the siblings use
-  exactly such a transfer matrix. For n ≫ 110 the premise inverts (state
-  count ≈ output ≈ 1.19ⁿ vs the enumerator's ≈ 1.32ⁿ). Reopened by explicit
-  user decision under an approved phased plan with an empirical Go/No-Go
-  (DESIGN §4.7, PLAN M6). The single-core *constant-factor* ledger stays
-  closed; this is the *asymptotic* path, gated to self-terminate and revert
-  cleanly on NO-GO. Outcome (GO or NO-GO) lands here with measured numbers.
-
 ## Resolved / evaluated-and-rejected (do not re-propose)
+
+- **Transfer matrix for n ≫ 110 (M6) — BUILT, PROFILED, REJECTED.** The
+  hypothesis that the transfer/kernel rejection below was merely
+  *depth-conditioned* (n ≲ 110) and would invert for the n ≫ 110 / full-b-file
+  regime was tested by building the engine in full (anti-diagonal Jensen DP:
+  scaffolding → weight knapsack → connectivity-signature DP with non-crossing
+  partition + sole-completion retirement) and measuring it. It was
+  **byte-identical to the §4.6 engine for all feasible n ≤ 57** and matched
+  `reconstruct_then_bfs` independently — *correctness was never the problem*.
+  Attribution profile (cell-centered, release): runtime/finalize-leaves
+  ≈ 3.0×/+4 (≈1.32ⁿ); **distinct frontier states ≈ 2.3×/+4 (≈1.23ⁿ)** vs
+  output `a(n)` and the shipped §4.6 enumerator ≈ 2.0×/+4 (≈1.19ⁿ); ≈10³×
+  slower than the enumerator at n=48 with the gap widening. The
+  **state-count floor itself (≈1.23ⁿ)** — the bound an idealized cell-by-cell
+  rewrite cannot beat — is asymptotically *worse* than the §4.6 enumerator
+  (≈1.19ⁿ): (1.23/1.19)ⁿ ≈ 1.03ⁿ, ≈10²–10³× more work by n=160 and diverging.
+  The D₈-wedge frontier (width ≈ n/4 × non-crossing partitions × per-component
+  edge bits × exact weight) does **not** collapse to output size. So the §4.5
+  rejection **extends to n ≫ 110**; the b-file's depth is the §3.3
+  composition of *siblings* (transfer matrices on far smaller fundamental
+  regions), not a transfer matrix on A142886's own wedge. Built behind a pure
+  `git mv` split, reverted cleanly to the M5 state on NO-GO. Confirms the
+  closed-ledger conclusion with hard numbers: **more terms = more compute,
+  not a transfer-matrix algorithm swap. Do not re-propose** (including
+  "but a cell-by-cell rewrite would fix it" — the profiled state floor refutes
+  that). DESIGN §4.7 / PLAN M6 carry the same record.
 
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the

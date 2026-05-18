@@ -148,53 +148,45 @@ remaining `69..=163` of the b-file is bounded only by the exponential
 enumeration (§4.5); reachable depth is empirical, not a fixed target. (A
 two-terminal `(A,B)` variant pinning the minimal diagonal cell was evaluated
 and was not faster once §4.6 / x-axis bucketing was in place — see §4.5 — so
-it is not pursued. The transfer/kernel reformulation's rejection is
-*depth-conditioned* (n ≲ 110); **M6** reopens it for the n ≫ 110 /
-full-b-file regime under a Go/No-Go gate — see §4.7.)
+it is not pursued. The transfer/kernel reformulation was reopened and
+**built/measured under M6 for the n ≫ 110 regime, then rejected** with hard
+numbers — see §4.7 / FUTURE.md.)
 
 **Acceptance:** `cargo test --release -- --ignored` matches the b-file to
 n=68 with zero mismatches — **met**.
 
-## Milestone M6 — Transfer-matrix enumerator (n ≫ 110)
+## Milestone M6 — Transfer-matrix enumerator (n ≫ 110) — REJECTED
 
-*Design ref: §4.7 (supersedes the §4.5 depth-conditioned rejection for
-n ≫ 110 only). Files: `src/enumerate/{mod,legacy,transfer}.rs`,
-`src/verify.rs`.* Bring-up is phased and **gated**; `legacy` stays the live
-engine until GO so the crate is green at every commit (no feature flag, no
-shipped coexisting variant).
+*Design ref: §4.7. Outcome: **NO-GO**.* The hypothesis that the §4.5
+transfer-matrix rejection was merely depth-conditioned (and would invert for
+n ≫ 110) was tested by building the engine in full and measuring it. The
+`enumerate.rs` split was a pure `git mv`; on NO-GO it was reverted cleanly,
+so the repo is back at the M5 state.
 
-- [x] **Phase 1 — scaffolding.** Split `enumerate.rs` →
-      `enumerate/{mod.rs,legacy.rs,transfer.rs}` (pure `git mv` for
-      `legacy`; trivial NO-GO revert). Anti-diagonal `WedgeScan`, slot
-      indexing, `max_scan_d`/`max_slots`, ported `in_wedge`/edge
-      predicates/`edge_reach_lb`. Geometry unit tests green; legacy +
-      public API byte-unchanged.
-- [x] **Phase 2 — weight DP.** `(weight, x-touched, diag-touched)` knapsack
-      over the scan, residue/apex dispatch (§3.3/§4.6(a)). No connectivity
-      yet — proven to over-count `legacy` per center (n≤40) and byte-exact
-      vs a brute subset oracle over the same bounded region (n∈{1,4,5,8,9},
-      cell+vertex).
-- [x] **Phase 3 — connectivity signature.** Anti-diagonal Jensen DP:
-      backward-link union–find, canonical (non-crossing) partition, the
-      retirement rule (sole component completes ⇒ resolve; any other
-      retirement ⇒ severed ⇒ drop), edge-flag carry on merge. Debug-asserts
-      non-crossing. **Byte-identical to `legacy`** (count + cell + vertex)
-      for all feasible n ≤ 24; §3.4 named shapes pass through it.
-- [ ] **Phase 4 — differential gate.** `#[ignore]` `diff_legacy`:
-      `transfer::` == `legacy::` byte-identical (cell/vertex/sum) every
-      feasible n ≡ 0,1 mod 4 up to `DIFF_BOUND` (68 → 100–108); forced-slice
-      vs `connectivity::reconstruct_then_bfs` for all ≤16-cell wedge subsets.
-- [ ] **Phase 5 — GO/NO-GO.** GO: `transfer` sole engine, delete `legacy`
-      same commit, `DEEP_BOUND` 68→163, `matches_bfile` over all 164 rows
-      zero-mismatch, sync DESIGN/PLAN/FUTURE. NO-GO: discard `transfer`,
-      `git mv` `legacy.rs`→`enumerate.rs`, record measured n≫110 numbers in
-      FUTURE.md.
+- [x] **Phase 1 — scaffolding.** Anti-diagonal `WedgeScan`, slot indexing,
+      `max_scan_d`, ported wedge/edge helpers. Geometry tests green.
+- [x] **Phase 2 — weight DP.** `(weight, edge-flags)` knapsack; brute-exact
+      vs a subset oracle, over-counts `legacy` as expected.
+- [x] **Phase 3 — connectivity signature.** Jensen anti-diagonal DP
+      (union–find, non-crossing partition, sole-completion retirement).
+      **Byte-identical to `legacy`** for all feasible n ≤ 24, and matched
+      `reconstruct_then_bfs` independently at small n.
+- [x] **Phase 4 — differential + profile.** Byte-identical to `legacy`
+      (count/cell/vertex) for every feasible n ≤ 57. Attribution profile
+      (cell, release): runtime ≈ 3.0×/+4 (≈1.32ⁿ); **distinct frontier
+      states ≈ 2.3×/+4 (≈1.23ⁿ)** vs output / §4.6 engine ≈ 2.0×/+4
+      (≈1.19ⁿ). ≈10³× slower than `legacy` at n=48, gap widening.
+- [x] **Phase 5 — NO-GO.** The state-count floor (≈1.23ⁿ) is strictly above
+      the §4.6 enumerator (≈1.19ⁿ), so even an idealized cell-by-cell rewrite
+      is asymptotically *worse*; n=140/160 infeasible. Discarded `transfer`,
+      reverted the split, numbers recorded in FUTURE.md.
 
-**Acceptance (GO):** `cargo test --release -- --ignored` shows `diff_legacy`
-zero-mismatch to the feasible bound **and** `matches_bfile` verifying all
-n=0..163 with zero mismatches. **Acceptance (NO-GO):** repo reverts to the
-M5 state with the evaluation recorded in FUTURE.md. Either way the design
-docs and code never drift.
+**Outcome:** correctness was never the issue (byte-identical through n≤57);
+the asymptotics are. The transfer matrix on A142886's own D₈ wedge does not
+yield an output-sized state space, so the §4.5 rejection **extends to
+n ≫ 110**. The b-file's depth is the §3.3 composition of *siblings* (computed
+by transfer matrices on far smaller fundamental regions), not a transfer
+matrix on this wedge. Repo reverted to M5; DESIGN/PLAN/FUTURE kept in sync.
 
 ## Traceability
 
@@ -206,7 +198,7 @@ docs and code never drift.
 | M3 Enumeration | §3, §4.2, §4.4, §4.6 | (b), (c), (d) |
 | M4 Verify/CLI | §6, §7(a) | (a) |
 | M5 Depth | §4.5, §7(g) | (g) |
-| M6 Transfer-matrix | §4.7 | scan geometry, `diff_legacy`, (g) deep |
+| M6 Transfer-matrix (rejected) | §4.7 | built, profiled, NO-GO |
 
 Every DESIGN.md component maps to exactly one milestone; nothing is orphaned.
 The §4.1 connectivity lemma (M2) is the load-bearing correctness item — its
@@ -219,12 +211,13 @@ brute-force agreement test (f) gates everything downstream.
   https://oeis.org/A142886/b142886.txt -o b142886.txt` run by the user.
 - **Depth is empirical.** The reachable `n` depends on machine/time budget;
   M5 records the achieved figure rather than promising n = 163. The §4.2/§4.6
-  enumeration is exponential (§4.5). The transfer/kernel rewrite's earlier
-  rejection is *depth-conditioned* (n ≲ 110, a constant-factor argument); the
-  b-file reaches n=163 only as the OEIS composition `A351127+A346800(n/4)`
-  (§3.3). **M6** reopens the transfer matrix for the n ≫ 110 regime under an
-  empirical Go/No-Go gate (§4.7) — it self-terminates and reverts cleanly if
-  the asymptotic win does not materialize.
+  enumeration is exponential (§4.5). The b-file reaches n=163 only as the
+  OEIS composition `A351127+A346800(n/4)` (§3.3). The "rejection is only
+  depth-conditioned" hypothesis was tested under **M6**: the transfer matrix
+  was built and profiled (§4.7) and **rejected with hard numbers** — its
+  state-count floor (≈1.23ⁿ) is asymptotically worse than the §4.6 enumerator
+  (≈1.19ⁿ). The rejection extends to n ≫ 110; greater depth is more compute,
+  not an algorithm swap.
 - **`u64` sufficiency.** Argued in DESIGN §5; the `Count` alias is the escape
   hatch to `num-bigint` with no call-site churn.
 - **No design drift.** Any change to the algorithm, orbit arithmetic, or the
