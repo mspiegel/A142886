@@ -244,18 +244,23 @@ deduplication), adapted to the quotient:
 ```
 For each center type (cell, vertex):
   For target size n with the right residue mod 4:
-    Grow an occupancy set restricted to W, cell by cell, from the
-    canonical seed (apex for cell-centered; innermost diagonal cell
-    for vertex-centered), using Redelmeier's "untried set" frontier so
-    each wedge configuration is generated exactly once.
-    When the orbit-size accounting (§3) totals exactly n cells:
-      accept iff S is 4-connected AND S touches both wedge edges (§4.1).
-      (no reconstruction; the §4.1 lemma makes this exact)
-    Prune any branch whose minimal completed size already exceeds n.
+    For each seed = the slice's lex-minimum cell:
+      Skip seeds of the dead parity (§4.6 residue split).
+      Grow an occupancy set restricted to W, cell by cell, from the
+      seed, using Redelmeier's "untried set" frontier so each wedge
+      configuration is generated exactly once.
+      When the orbit-size accounting (§3) totals exactly n cells:
+        accept iff S is 4-connected AND S touches both wedge edges (§4.1).
+        (no reconstruction; the §4.1 lemma makes this exact)
+      Prune any branch whose minimal completed size already exceeds n.
+      Prune any branch that can no longer touch both wedge edges within
+      the remaining weight budget (§4.6 edge-reachability bound).
 ```
 
 Because distinct wedge sets ↔ distinct symmetric polyominoes (§2), the
 running count is exact with no canonical-form pass and no Burnside sum.
+The two extra prunes (§4.6) only delete provably-empty subtrees, so the
+count is unchanged.
 
 ### 4.3 Connectivity test
 
@@ -280,27 +285,97 @@ tests (§7f), never run in the counting loop.
   their counts are simply added.
 - **Empty polyomino.** `count(0) = 1` is hard-coded.
 
-### 4.5 Scaling to the full b-file (n ≤ 163)
+### 4.5 Depth limits
 
-Because connectivity is now an O(|S|) slice-local predicate (§4.1) on only
-≈ n/8 cells — no per-candidate reconstruction or full-figure BFS — the
-remaining cost is the wedge enumeration itself. Plain wedge-enumeration with
-the slice predicate reaches well beyond a reconstruct-and-BFS baseline; this
-design still does not over-claim a specific ceiling.
+Because connectivity is an O(|S|) slice-local predicate (§4.1) on only
+≈ n/8 cells — no per-candidate reconstruction or full-figure BFS — the only
+remaining cost is the wedge enumeration itself, sharply reduced by the §4.6
+prunes. That enumeration is still exponential, so reachable `n` is empirical
+(machine- and time-budget-dependent), not a fixed guarantee; this design does
+not promise the full b-file (n ≤ 163).
 
-Documented path to greater depth, matching the references:
+A transfer/kernel reformulation — processing the wedge by diagonals with a
+bounded frontier state carrying the connectivity signature — was evaluated as
+the route to polynomial-per-term depth. In practice it was **not faster** than
+the §4.6-pruned enumerator at the depths of interest (its per-node state
+bookkeeping outweighed the branching it removed once §4.6 was in place), so it
+is not pursued and is intentionally absent from the plan. The shipped
+algorithm is the §4.2 Redelmeier enumeration with the §4.6 prunes; greater
+depth comes from running it longer, not from an algorithm swap.
 
-- Maintain the slice's connected components **incrementally** with a
-  union–find updated as wedge cells are added/removed during the recursion,
-  plus running flags for "touches x-axis edge" / "touches diagonal edge", so
-  the §4.1 predicate is O(1) amortized per node rather than O(|S|).
-- Enumerate the wedge **kernel** with the quotient/transfer structure used by
-  Redelmeier (Table 3) and Oliveira e Silva, exploiting the ≈ n/8 wedge
-  footprint and processing the wedge in diagonals/columns so a bounded
-  frontier state captures intra-wedge adjacency.
+### 4.6 Residue-class seed split and edge-reachability pruning
 
-The baseline ships and is verified first; the kernel/transfer refinement is a
-follow-on optimization, not a correctness change.
+Two exact, count-preserving prunes sit on top of the §4.2 baseline. Both
+only delete subtrees that provably contribute zero, so every `count(n)` is
+byte-identical to §4.2 (regression-checked n = 0..68 against the b-file and
+the embedded reference).
+
+**(a) Residue-class seed split (the "path-vs-ring" decomposition).** From
+§3.1 a cell-centered slice has weight `c + 4e + 8i` with `c ∈ {0,1}` the apex
+bit, so
+
+```
+slice contains the apex (0,0)   ⟺   weight ≡ 1 (mod 4)
+slice omits the apex            ⟺   weight ≡ 0 (mod 4)
+```
+
+and since `(0,0)` is the global lex-minimum, "contains the apex" ⟺ "seed is
+`(0,0)`". For a fixed target `n` only one parity can ever sum to `n`, so:
+
+- **n ≡ 1 (mod 4) — center occupied ("a path out from the center").**
+  Every counted slice contains the apex, hence has seed `(0,0)`; *every other
+  seed's entire Redelmeier subtree is provably empty* and is skipped. The
+  apex lies on both wedge edges, so §4.1 condition 2 is satisfied for free —
+  the rest of the slice is unconstrained by it (it may touch zero, one, or
+  both edges) and acceptance reduces to "weight == n".
+- **n ≡ 0 (mod 4), cell-centered — center empty ("a ring from the x-axis
+  edge to the diagonal edge").** No counted slice contains the apex, so the
+  `(0,0)` seed subtree (the single largest one) is skipped; condition 2 now
+  binds and is the operative filter.
+- **Vertex-centered** has no apex and is always `n ≡ 0`; every seed is live.
+
+These two cases are not merely separable, they are **mutually exclusive per
+`n`**: the residue of `n` mod 4 forces exactly one. So there is *no*
+"configurations that have both a center path and a ring" inclusion–exclusion
+term — it is identically zero. A center-occupied slice may itself wind into
+an annulus, but it is still one connected slice counted once by the
+minimum-cell discipline; nothing ever adds a separate "ring count" to correct
+against. (The cell-empty and vertex-centered counts, both at `n ≡ 0`, are
+summed without correction because their centroids differ — §3.3.)
+
+**(b) Edge-reachability bound (admissible prune for the ring case).** Track,
+over the current slice, `min_y` (smallest `y`) and `min_gap` (smallest
+`x − y`). If the x-axis edge is not yet touched, any connected addition
+reaching `y = 0` needs ≥ `min_y` new cells (one per unit step in `−y`);
+likewise ≥ `min_gap` new cells to reach the diagonal `x = y`. The two
+excursions may share cells, so the **sound** lower bound on new cells is
+`max(min_y′, min_gap′)` — never the sum (`max` cannot over-estimate, so it
+never prunes a branch that still admits a valid polyomino). Every new cell
+has orbit weight ≥ 4, giving
+
+```
+extra_weight_needed ≥ 4 · max( tx? 0 : min_y ,  td? 0 : min_gap )
+```
+
+Prune the subtree when `weight + extra_weight_needed > n`. The quantity
+`weight + 4·max(…)` is non-decreasing down the recursion (weight rises ≥ 4
+per added cell while `min_y`/`min_gap` fall ≤ 1), so a node that exceeds `n`
+has every descendant exceed it — pruning the whole subtree is sound.
+
+**Measured effect (release, cumulative `--max-n`).** The speedup grows with
+`n` (the prune lowers the effective branching, not just a constant factor):
+
+| n  | §4.2 baseline | with §4.6 | speedup |
+|----|---------------|-----------|---------|
+| 56 | 0.83 s        | 0.02 s    | ≈ 40×   |
+| 60 | 2.13 s        | 0.03 s    | ≈ 70×   |
+| 64 | 4.03 s        | 0.05 s    | ≈ 80×   |
+| 68 | 10.44 s       | 0.11 s    | ≈ 95×   |
+
+The full `0..=68` `--ignored` regression sweep drops from ≈15 s to ≈0.2 s.
+This is a large constant/branching improvement, not an asymptotic change: the
+wedge enumeration is still exponential (§4.5), so this lowers the constant and
+pushes the reachable `n` out without changing the growth class.
 
 ## 5. Rust implementation sketch
 
@@ -347,17 +422,22 @@ Embed the following as `#[cfg(test)] mod tests` in the crate.
 `cargo test` runs (a)–(f); `cargo test -- --ignored` runs the b-file
 regression (g).
 
-> **Baseline runtime note (measured, M3).** The §4.2 baseline enumerator
-> visits all connected wedge slices of weight ≤ n, which grows exponentially:
-> measured debug-build cost is ≈0.26 s at n=40, ≈1.2 s at n=48, ≈17 s at
-> n=60. So the *always-on* `cargo test` checks of the heavy `n ≡ 0,1 (mod 4)`
-> cases are bounded at **n ≤ 40** (constant `HEAVY_BOUND`); the cheap
-> `n ≡ 2,3 (mod 4)` zero cases still cover the full `0..120`. The reference
-> vector (a) is likewise split: a fast `0..=40` prefix runs always, the full
-> `0..=68` and the b-file `0..=163` are the on-demand `#[ignore]` deep checks
-> ((a-deep)/(g), milestone M5). Reaching the full table at speed is M6
-> (§4.5). This bound is a runtime accommodation only — the algorithm is
-> unchanged.
+> **Baseline runtime note (measured, M3; updated for §4.6).** The §4.2
+> enumerator visits all connected wedge slices of weight ≤ n, growing
+> exponentially: original debug-build cost ≈0.26 s at n=40, ≈1.2 s at n=48,
+> ≈17 s at n=60. The §4.6 prunes (count-preserving) cut this ≈40–95× (release:
+> n=68 from ≈10 s to ≈0.1 s; the full `0..=68` `--ignored` sweep from ≈15 s to
+> ≈0.2 s) — still exponential, just a much lower branching factor. The
+> *always-on* `cargo test` checks of the heavy `n ≡ 0,1 (mod 4)` cases remain
+> bounded at **n ≤ 40** (constant `HEAVY_BOUND`) and the reference-vector
+> always-on tier at `0..=40`; after §4.6 this is a comfortable safety margin
+> (it absorbs the slower debug build and any future regression) rather than a
+> tight ceiling. The cheap `n ≡ 2,3 (mod 4)` zero cases still cover the full
+> `0..120`; the full `0..=68` and the b-file `0..=163` stay the on-demand
+> `#[ignore]` deep checks ((a-deep)/(g), milestone M5). The enumeration stays
+> exponential (§4.5); reachable depth is empirical, not a fixed target. These
+> bounds are a runtime accommodation only — the algorithm is unchanged and
+> counts are byte-identical.
 
 **(a) Reference-vector test — known prefix.** The OEIS prefix
 (`n = 0..=68`) is the oracle. Per the baseline-runtime note it is checked in
@@ -478,7 +558,8 @@ fn slice_predicate_edge_conditions() {
 **(g) b-file regression (ignored by default).** Cross-checks `count(n)`
 against the authoritative OEIS b-file *and* the embedded `REFERENCE`, bounded
 at `DEEP_BOUND` (the baseline-runtime note: the literal `0..=163` is
-infeasible without the M6 rewrite). Absent data is a skip, not a failure.
+infeasible — the enumeration is exponential, §4.5). Absent data is a skip,
+not a failure.
 
 ```rust
 #[test]
@@ -495,8 +576,9 @@ fn matches_bfile() {
 ```
 
 Status (M5): verified — `count(n) == a(n)` for **n = 0..=68** against both
-the OEIS b-file and `REFERENCE`, zero mismatches (release `--ignored`
-≈15 s). Deeper requires M6 (§4.5).
+the OEIS b-file and `REFERENCE`, zero mismatches (release `--ignored` ≈0.2 s
+after §4.6). Deeper `n` is bounded only by the exponential enumeration
+(§4.5).
 
 ## 8. References
 

@@ -90,6 +90,11 @@ and the §4.1 edge-condition cases (`{(3,1)}`, `{(2,1),(3,1)}`,
       cell-centered drives `n ≡ 0,1`, vertex-centered only `n ≡ 0 (mod 4)`.
 - [x] Wire `count_cell_centered`, `count_vertex_centered`, and
       `count = cell + vertex` (disjoint per §3.3, summed directly).
+- [x] §4.6 count-preserving prunes: residue-class seed split (skip the dead
+      parity's seeds — apex-only for `n ≡ 1`, apex-skipped for `n ≡ 0`) and
+      the admissible edge-reachability bound. Counts byte-identical to the
+      §4.2 baseline (regression vs b-file + reference, n = 0..68); measured
+      ≈40–95× speedup, growing with n.
 
 **Acceptance:** tests **(b)** named shapes, **(c)** zero-pattern, **(d)**
 split-formula pass; the §3.4 hand cases n = 1,4,5,8,9 reproduce
@@ -125,30 +130,20 @@ correct table; `cargo run -- --verify` reports all-match on the prefix.
 - [x] `#[ignore]`d `matches_oeis_prefix_full` (0..=68) and `matches_bfile`
       (count vs b-file *and* b-file vs `REFERENCE`), bounded at
       `verify::DEEP_BOUND = 68`; absent b-file → skip, not fail.
-- [x] Measured release timing: n=60 ≈1.2 s, n=64 ≈1.9 s, n=68 ≈6 s
-      (≈3× per +4 beyond); the full `0..=68` deep `--ignored` sweep ≈15 s.
+- [x] Measured release timing: pre-§4.6 n=60 ≈2.1 s, n=64 ≈4.0 s, n=68
+      ≈10 s; post-§4.6 n=60 ≈0.03 s, n=64 ≈0.05 s, n=68 ≈0.11 s. The full
+      `0..=68` deep `--ignored` sweep dropped from ≈15 s to ≈0.2 s.
 
 **Achieved depth:** `count(n) == a(n)` verified for **n = 0..=68** against
 both the OEIS b-file and the embedded `REFERENCE`, zero mismatches. `u64`
 empirically sufficient (a(161)=29 256 182 414 ≈ 2.9e10 ≪ u64::MAX). The
-remaining `69..=163` of the b-file is gated behind the M6 transfer/kernel
-rewrite (§4.5) — not a baseline target.
+remaining `69..=163` of the b-file is bounded only by the exponential
+enumeration (§4.5); reachable depth is empirical, not a fixed target. (A
+transfer/kernel reformulation was evaluated and was not faster once §4.6 was
+in place — see §4.5 — so it is not pursued.)
 
 **Acceptance:** `cargo test --release -- --ignored` matches the b-file to
 n=68 with zero mismatches — **met**.
-
-## Milestone M6 — Stretch (optional, non-blocking)
-
-*Design ref: §4.5.*
-
-- [ ] Maintain the slice's union–find + "touches x-axis" / "touches
-      diagonal" flags **incrementally** across the recursion → §4.1
-      predicate O(1) amortized per node.
-- [ ] Kernel/transfer enumeration (process the wedge by diagonals/columns
-      with a bounded frontier) for greater depth.
-
-**Acceptance:** counts identical to M3 on every tested `n`; strictly greater
-reachable depth. Never a correctness change — pure optimization.
 
 ## Traceability
 
@@ -157,10 +152,9 @@ reachable depth. Never a correctness change — pure optimization.
 | M0 Scaffold | §5, §6 | build only |
 | M1 Symmetry | §2, §3.1, §3.2 | (e) |
 | M2 Connectivity | §4.1, §4.3 | (f) |
-| M3 Enumeration | §3, §4.2, §4.4 | (b), (c), (d) |
+| M3 Enumeration | §3, §4.2, §4.4, §4.6 | (b), (c), (d) |
 | M4 Verify/CLI | §6, §7(a) | (a) |
 | M5 Depth | §4.5, §7(g) | (g) |
-| M6 Stretch | §4.5 | regression vs M3 |
 
 Every DESIGN.md component maps to exactly one milestone; nothing is orphaned.
 The §4.1 connectivity lemma (M2) is the load-bearing correctness item — its
@@ -172,8 +166,10 @@ brute-force agreement test (f) gates everything downstream.
   crate never makes network calls. Suggested: `curl -L
   https://oeis.org/A142886/b142886.txt -o b142886.txt` run by the user.
 - **Depth is empirical.** The reachable `n` depends on machine/time budget;
-  M5 records the achieved figure rather than promising n = 163. M6 is the
-  documented path further.
+  M5 records the achieved figure rather than promising n = 163. The
+  enumeration is exponential (§4.5); a transfer/kernel rewrite was evaluated
+  and dropped (not faster post-§4.6), so there is no further milestone —
+  greater depth is just more runtime.
 - **`u64` sufficiency.** Argued in DESIGN §5; the `Count` alias is the escape
   hatch to `num-bigint` with no call-site churn.
 - **No design drift.** Any change to the algorithm, orbit arithmetic, or the

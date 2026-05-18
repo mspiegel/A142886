@@ -21,6 +21,28 @@ fn in_wedge(c: Cell) -> bool {
     c.0 >= 0 && c.1 >= 0 && c.1 <= c.0
 }
 
+/// Admissible lower bound on the *extra* orbit-weight any completion still
+/// needs in order to satisfy §4.1 condition 2 (touch both wedge edges).
+///
+/// `min_y` = the smallest `y` over the current slice; `min_gap` = the smallest
+/// `x − y`. If the x-axis edge is not yet touched (`tx == 0`) a connected
+/// addition reaching `y = 0` needs ≥ `min_y` new cells (one per unit step in
+/// `−y`); likewise ≥ `min_gap` new cells to reach the diagonal `x = y`. The
+/// two excursions may share cells, so the sound lower bound on *new cells* is
+/// `max` (never the sum — `max` cannot over-estimate, so it never prunes a
+/// branch that still admits a valid polyomino). Every new cell has orbit
+/// weight ≥ 4, hence the `4 *` factor.
+///
+/// `weight + edge_reach_lb(..) ` is non-decreasing down the recursion (weight
+/// rises ≥ 4 per added cell; `min_y`/`min_gap` fall ≤ 1), so a node that
+/// exceeds `n` has every descendant exceed it — the whole subtree is prunable.
+#[inline]
+fn edge_reach_lb(tx: u32, td: u32, min_y: i32, min_gap: i32) -> u64 {
+    let rx = if tx > 0 { 0 } else { min_y as u64 };
+    let rd = if td > 0 { 0 } else { min_gap as u64 };
+    4 * rx.max(rd)
+}
+
 #[inline]
 fn on_x_axis_edge(c: Cell) -> bool {
     c.1 == 0
@@ -47,12 +69,33 @@ fn enumerate(center: Center, n: usize) -> Count {
     let xmax = n as i32;
     let mut total: Count = 0;
 
+    // Residue-based seed restriction (DESIGN.md §3.1). A cell-centered slice
+    // has weight `c + 4e + 8i` with `c ∈ {0,1}` the apex bit, so its weight
+    // is ≡ 1 (mod 4) iff it contains the apex `(0,0)` and ≡ 0 otherwise.
+    // Hence for the target residue, all slices of the *other* parity have
+    // weight that can never equal `n` — their entire Redelmeier subtree is
+    // provably empty. Since `(0,0)` is the global lex-minimum, "contains the
+    // apex" ⟺ "seed is `(0,0)`", so we skip the dead seeds outright:
+    //   n ≡ 1 (mod 4): center occupied — only the apex seed produces n.
+    //   n ≡ 0 (mod 4): center empty (the "ring") — the apex seed produces
+    //                  only n ≡ 1, so skip it.
+    // (Vertex-centered has no apex; `n` is always ≡ 0 and every seed is live.)
+    let apex_required = center == Center::Cell && n % 4 == 1;
+    let apex_forbidden = center == Center::Cell && n % 4 == 0;
+
     // Iterate the slice's minimum cell in (x, y) lexicographic order; for
     // each, Redelmeier-grow using only strictly-greater wedge cells. Each
     // connected slice has a unique minimum, so it is counted exactly once.
     for sx in 0..=xmax {
         for sy in 0..=sx {
             let seed = (sx, sy);
+            let is_apex = center == Center::Cell && seed == (0, 0);
+            if apex_required && !is_apex {
+                continue; // dead parity: weight ≡ 0 (mod 4) ≠ n
+            }
+            if apex_forbidden && is_apex {
+                continue; // dead parity: weight ≡ 1 (mod 4) ≠ n
+            }
             let ws = orbit_size(center, seed) as u64;
             if ws > n {
                 continue;
@@ -64,6 +107,12 @@ fn enumerate(center: Center, n: usize) -> Count {
                     total += 1;
                 }
                 continue; // any extension exceeds n
+            }
+            // Edge-reachability prune (the "ring" case): if even the
+            // cheapest completion cannot touch both wedge edges within the
+            // budget, this seed's whole subtree is dead (§4.1 condition 2).
+            if ws + edge_reach_lb(tx, td, sy, sx - sy) > n {
+                continue;
             }
             let mut p: HashSet<Cell> = HashSet::new();
             p.insert(seed);
@@ -84,6 +133,8 @@ fn enumerate(center: Center, n: usize) -> Count {
                 ws,
                 tx,
                 td,
+                sy,
+                sx - sy,
                 &untried,
                 &mut blocked,
                 &mut total,
@@ -110,10 +161,18 @@ fn grow(
     weight: u64,
     tx: u32,
     td: u32,
+    min_y: i32,
+    min_gap: i32,
     untried: &[Cell],
     blocked: &mut HashSet<Cell>,
     total: &mut Count,
 ) {
+    // Edge-reachability prune (§4.1 condition 2): no descendant of this node
+    // can ever touch both wedge edges within the remaining budget. Sound
+    // because `weight + edge_reach_lb(..)` only grows down the recursion.
+    if weight + edge_reach_lb(tx, td, min_y, min_gap) > n {
+        return;
+    }
     let mut blocked_here: Vec<Cell> = Vec::new();
     for i in 0..untried.len() {
         let c = untried[i];
@@ -146,7 +205,19 @@ fn grow(
                     }
                 }
                 grow(
-                    center, n, seed, xmax, p, w2, ntx, ntd, &child, blocked, total,
+                    center,
+                    n,
+                    seed,
+                    xmax,
+                    p,
+                    w2,
+                    ntx,
+                    ntd,
+                    min_y.min(c.1),
+                    min_gap.min(c.0 - c.1),
+                    &child,
+                    blocked,
+                    total,
                 );
             }
             p.remove(&c);
