@@ -21,9 +21,18 @@ _No deferred work is currently parked._
   ≈1.33× faster, ratio non-eroding, byte-identical (n≤100 vs the prior
   engine; n≤68 vs b-file/`REFERENCE`); O(1), no per-node search. Soundness
   is per-node admissibility (the bound is not monotone). See DESIGN §4.6(b).
-  *Open follow-ons (same cell-budget fact, not pursued):* tighter `xmax`
-  for `CellSet` cache/locality (#2); `rayon` over the ~`n` independent
-  buckets (≈#cores wall-clock, count-preserving).
+- **Tighter `xmax` for `CellSet` cache (#2) — evaluated and rejected.**
+  Capping `xmax` at `n/2` (rigorous: any cell of a valid both-edges
+  connected slice has `x ≤ 2|S|−2 ≤ n/2`) is *correct* (byte-identical
+  n≤100 vs `e3dd44e`, n≤68 vs b-file/`REFERENCE`) but **~5–7% slower**, not
+  faster, across n=96–112. The cache hypothesis was wrong: the per-bucket
+  bitset *working set* is the actual slice extent, not `xmax`, and was
+  already cache-resident — shrinking the allocation bound buys nothing and
+  adds slight overhead. Profile tail (lines 52/82/58) unchanged.
+  **Do not re-attempt** (any `xmax` constant fails for the same reason —
+  the bitset is not the bottleneck; the recursion is).
+  *Open follow-on (not pursued):* `rayon` over the ~`n` independent buckets
+  (≈#cores wall-clock, count-preserving) — the one remaining real lever.
 - **Two-terminal `(A,B)` enumerator — rejected.** Also pinning the minimal
   diagonal cell `B=(bx,bx)` and bucketing by the pair `(A,B)` (accept iff
   `B∈S`, so the §4.1 both-edges condition holds by construction instead of
