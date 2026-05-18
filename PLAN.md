@@ -1,0 +1,181 @@
+# PLAN: Implementing OEIS A142886
+
+This is the execution plan for the Rust crate specified in [`DESIGN.md`](./DESIGN.md).
+It **operationalizes** the design — sequencing, acceptance criteria, file
+ownership — and introduces **no new technical decisions**. Every milestone
+traces back to a DESIGN.md section (see the Traceability table) and ends with
+a green `cargo test`.
+
+**Goal:** compute `a(n)` for OEIS A142886 (polyominoes with full D₈ square
+symmetry) as far as feasible, verified against the OEIS b-file
+(`https://oeis.org/A142886/b142886.txt`, n = 0..163).
+
+## Conventions
+
+- Count type alias `pub type Count = u64;` everywhere a term value flows; a
+  big-integer backend (`num-bigint`) is a single-line swap if ever needed
+  (DESIGN §5 argues `u64` suffices through n = 163).
+- Lattice cells are `(i32, i32)`; wedge occupancy is a `HashSet<(i32,i32)>`
+  (packed bitset is a later optimization, not a correctness concern).
+- Errors via `anyhow` in `main`/`verify`; library code returns `Result` or
+  panics only in tests.
+- Each milestone must leave the tree `cargo fmt`-clean, `cargo clippy`-clean
+  (no warnings), and `cargo test` green before the next milestone starts.
+- Test labels `(a)`–`(g)` below refer to DESIGN.md §7.
+
+## Milestone M0 — Scaffold
+
+*Design ref: §5, §6.* Files: `Cargo.toml`, `src/main.rs`, `src/symmetry.rs`,
+`src/enumerate.rs`, `src/connectivity.rs`, `src/verify.rs`.
+
+- [ ] `Cargo.toml`: package name `a142886`, edition 2021; `[features]
+      parallel = ["rayon"]` with `rayon` optional; dev-deps as needed.
+- [ ] `src/` skeleton with the five modules; declare `mod` tree in `main.rs`
+      (or `lib.rs` + thin `main.rs` so tests can call the library).
+- [ ] `pub type Count = u64;` and the public API signatures from §5 as
+      `todo!()` stubs: `count`, `count_cell_centered`, `count_vertex_centered`.
+- [ ] CLI argument parsing stub: `--max-n N`, `--center cell|vertex|both`
+      (default `both`), `--verify`.
+- [ ] `#[cfg(test)] mod tests` harness compiling (empty).
+
+**Acceptance:** `cargo build` and `cargo test` (no tests) both succeed.
+
+## Milestone M1 — Symmetry core
+
+*Design ref: §2, §3.1, §3.2, §7(e).* File: `src/symmetry.rs`.
+
+- [ ] The 8 transforms as the closed-form maps from the §2 table
+      (`e, r, r², r³, s, sr, sr², sr³`).
+- [ ] Cell-centered: `orbit_cell((x,y))`, `representative_in_W` with the
+      wedge-edge tie-break, and an orbit-size classifier returning
+      1 (apex) / 4 (x-axis or diagonal edge) / 8 (interior) per §3.1.
+- [ ] Vertex-centered: orbit + representative + classifier per §3.2
+      (diagonal cells `(i,i)` → size 4; others → size 8; 2×2 core seed).
+
+**Acceptance:** test **(e)** `group_axioms_and_orbit_sizes` passes; orbit
+sizes equal the §3.1 / §3.2 tables for sampled apex/edge/interior cells.
+
+## Milestone M2 — Connectivity predicate
+
+*Design ref: §4.1, §4.3, §7(f).* File: `src/connectivity.rs`.
+
+- [ ] `slice_is_connected_polyomino(S) -> bool` = **(i)** `S` is one
+      4-connected component (BFS or union–find over the wedge cells) **and**
+      **(ii)** `S` has an occupied cell on the x-axis edge *and* one on the
+      diagonal edge (apex / 2×2-core seed satisfies both alone). This is the
+      §4.1 lemma; the only acceptance test on the hot path.
+- [ ] Debug-only `reconstruct_then_bfs(S)`: `⋃_{g∈D₈} g·S`, assert
+      `|P| == expected_n`, BFS connectivity — gated behind
+      `debug_assertions` / used only from tests, never the counting loop.
+
+**Acceptance:** tests **(f)** `slice_predicate_edge_conditions` and
+`slice_predicate_matches_reconstruction` pass — the predicate agrees with
+brute reconstruction over **all** small slices for **both** center types,
+and the §4.1 edge-condition cases (`{(3,1)}`, `{(2,1),(3,1)}`,
+`{(1,0),(1,1)}`, `{(0,0),(1,0)}`, `{(2,1),(2,2)}`) resolve as specified.
+
+## Milestone M3 — Enumeration
+
+*Design ref: §3, §4.2, §4.4, §7(b)(c)(d).* File: `src/enumerate.rs`.
+
+- [x] Redelmeier untried-set recursive growth restricted to `W`, seeded by
+      the slice's **minimum cell** in `(x,y)` lex order (each connected slice
+      has a unique minimum ⇒ generated once); per-seed `blocked` set carries
+      Redelmeier's ancestor-exclusion so no slice is double-counted.
+- [x] Orbit-size accounting (§3.1 / §3.2) to track the reconstructed size
+      and stop exactly at `n`; prune any branch whose weight exceeds `n`.
+- [x] Acceptance via the §4.1 edge-touch conditions on the slice
+      (connectivity is by construction; no reconstruction on the hot path).
+- [x] Base / edge cases: `count(0) == 1` hard-coded; `n ≡ 2,3 (mod 4) ⇒ 0`;
+      cell-centered drives `n ≡ 0,1`, vertex-centered only `n ≡ 0 (mod 4)`.
+- [x] Wire `count_cell_centered`, `count_vertex_centered`, and
+      `count = cell + vertex` (disjoint per §3.3, summed directly).
+
+**Acceptance:** tests **(b)** named shapes, **(c)** zero-pattern, **(d)**
+split-formula pass; the §3.4 hand cases n = 1,4,5,8,9 reproduce
+(`a(9)=2` is the decisive arithmetic-plus-connectivity check). Plus an
+always-on `matches_oeis_prefix_to_40` early correctness check. Per the
+DESIGN.md §7 baseline-runtime note, always-on heavy `n ≡ 0,1 (mod 4)` checks
+are bounded at **n ≤ 40** (`HEAVY_BOUND`); the full `0..=68` prefix and the
+b-file are the on-demand deep checks in M5.
+
+## Milestone M4 — Verification & CLI
+
+*Design ref: §6, §7(a).* Files: `src/verify.rs`, `src/main.rs`.
+
+- [x] Embed the 69-term reference vector (§7a, `verify::REFERENCE`, single
+      source of truth); always-on `matches_oeis_prefix_to_40` plus
+      `#[ignore]`d `matches_oeis_prefix_full` (0..=68) deep check.
+- [x] `parse_bfile(path)` → `Vec<(usize, Count)>` (comment/blank-tolerant)
+      with a fast unit test.
+- [x] `--verify`: compare `count()` to the embedded vector, and to
+      `b142886.txt` if present in CWD; clear pass/fail summary + exit code.
+- [x] Finish CLI: `--max-n` prints `n a(n)` (center-aware via `Center::term`);
+      `--center cell|vertex|both`; `-h/--help`; bad args → help + exit 1.
+
+**Acceptance:** test **(a)** passes; `cargo run -- --max-n 40` prints the
+correct table; `cargo run -- --verify` reports all-match on the prefix.
+
+## Milestone M5 — Depth / b-file regression
+
+*Design ref: §4.5, §7(g).* File: tests in `src/verify.rs`.
+
+- [x] Obtain `b142886.txt` (`curl -L https://oeis.org/A142886/b142886.txt`;
+      164 lines, n=0..163; the crate never fetches it).
+- [x] `#[ignore]`d `matches_oeis_prefix_full` (0..=68) and `matches_bfile`
+      (count vs b-file *and* b-file vs `REFERENCE`), bounded at
+      `verify::DEEP_BOUND = 68`; absent b-file → skip, not fail.
+- [x] Measured release timing: n=60 ≈1.2 s, n=64 ≈1.9 s, n=68 ≈6 s
+      (≈3× per +4 beyond); the full `0..=68` deep `--ignored` sweep ≈15 s.
+
+**Achieved depth:** `count(n) == a(n)` verified for **n = 0..=68** against
+both the OEIS b-file and the embedded `REFERENCE`, zero mismatches. `u64`
+empirically sufficient (a(161)=29 256 182 414 ≈ 2.9e10 ≪ u64::MAX). The
+remaining `69..=163` of the b-file is gated behind the M6 transfer/kernel
+rewrite (§4.5) — not a baseline target.
+
+**Acceptance:** `cargo test --release -- --ignored` matches the b-file to
+n=68 with zero mismatches — **met**.
+
+## Milestone M6 — Stretch (optional, non-blocking)
+
+*Design ref: §4.5.*
+
+- [ ] Maintain the slice's union–find + "touches x-axis" / "touches
+      diagonal" flags **incrementally** across the recursion → §4.1
+      predicate O(1) amortized per node.
+- [ ] Kernel/transfer enumeration (process the wedge by diagonals/columns
+      with a bounded frontier) for greater depth.
+
+**Acceptance:** counts identical to M3 on every tested `n`; strictly greater
+reachable depth. Never a correctness change — pure optimization.
+
+## Traceability
+
+| Milestone | DESIGN.md sections | Tests |
+|---|---|---|
+| M0 Scaffold | §5, §6 | build only |
+| M1 Symmetry | §2, §3.1, §3.2 | (e) |
+| M2 Connectivity | §4.1, §4.3 | (f) |
+| M3 Enumeration | §3, §4.2, §4.4 | (b), (c), (d) |
+| M4 Verify/CLI | §6, §7(a) | (a) |
+| M5 Depth | §4.5, §7(g) | (g) |
+| M6 Stretch | §4.5 | regression vs M3 |
+
+Every DESIGN.md component maps to exactly one milestone; nothing is orphaned.
+The §4.1 connectivity lemma (M2) is the load-bearing correctness item — its
+brute-force agreement test (f) gates everything downstream.
+
+## Risks & notes
+
+- **b-file needs network.** Fetching `b142886.txt` is out-of-band (M5); the
+  crate never makes network calls. Suggested: `curl -L
+  https://oeis.org/A142886/b142886.txt -o b142886.txt` run by the user.
+- **Depth is empirical.** The reachable `n` depends on machine/time budget;
+  M5 records the achieved figure rather than promising n = 163. M6 is the
+  documented path further.
+- **`u64` sufficiency.** Argued in DESIGN §5; the `Count` alias is the escape
+  hatch to `num-bigint` with no call-site churn.
+- **No design drift.** Any change to the algorithm, orbit arithmetic, or the
+  connectivity criterion is a DESIGN.md change first, then reflected here —
+  PLAN.md must not diverge from DESIGN.md.
