@@ -14,7 +14,64 @@
 
 use crate::symmetry::{orbit_size, Cell, Center};
 use crate::Count;
-use std::collections::HashSet;
+
+/// Dense bitset over the bounded wedge cells `(x, y)` with `0 ≤ y ≤ x ≤ xmax`
+/// (DESIGN.md §2; the recursion never produces a cell outside this triangle).
+///
+/// Replaces the per-`grow` `HashSet<Cell>` used for the slice (`p`) and the
+/// Redelmeier excluded set (`blocked`). Cells are bounded integers, so a flat
+/// bit-array indexed by `x·stride + y` gives O(1) insert/contains/remove with
+/// no hashing and a single allocation per `enumerate` call (reused, not
+/// re-grown, down the whole recursion). Profiling attributed ~63% of run time
+/// to SipHash on these two sets; this removes that path. The recursion
+/// structure — and therefore every count — is unchanged.
+struct CellSet {
+    words: Vec<u64>,
+    stride: usize,
+}
+
+impl CellSet {
+    /// Allocate a cleared set covering `0 ≤ x, y ≤ xmax`.
+    fn new(xmax: i32) -> Self {
+        let stride = xmax as usize + 1;
+        let bits = stride * stride;
+        CellSet {
+            words: vec![0u64; bits.div_ceil(64)],
+            stride,
+        }
+    }
+
+    /// Flat bit index of `c`. Caller guarantees `0 ≤ c.1 ≤ c.0 ≤ xmax`
+    /// (every call site checks `in_wedge` and `≤ xmax` first).
+    #[inline]
+    fn index(&self, c: Cell) -> usize {
+        c.0 as usize * self.stride + c.1 as usize
+    }
+
+    #[inline]
+    fn contains(&self, c: Cell) -> bool {
+        let i = self.index(c);
+        self.words[i / 64] & (1u64 << (i % 64)) != 0
+    }
+
+    /// Set the bit; return `true` iff it was newly set (matches the
+    /// `HashSet::insert` contract the `blocked` bookkeeping relies on).
+    #[inline]
+    fn insert(&mut self, c: Cell) -> bool {
+        let i = self.index(c);
+        let w = &mut self.words[i / 64];
+        let mask = 1u64 << (i % 64);
+        let was_set = *w & mask != 0;
+        *w |= mask;
+        !was_set
+    }
+
+    #[inline]
+    fn remove(&mut self, c: Cell) {
+        let i = self.index(c);
+        self.words[i / 64] &= !(1u64 << (i % 64));
+    }
+}
 
 #[inline]
 fn in_wedge(c: Cell) -> bool {
@@ -114,13 +171,21 @@ fn enumerate(center: Center, n: usize) -> Count {
             if ws + edge_reach_lb(tx, td, sy, sx - sy) > n {
                 continue;
             }
-            let mut p: HashSet<Cell> = HashSet::new();
+            // All four scratch structures are allocated once per seed and
+            // reused across the seed's entire recursion subtree (push/truncate,
+            // never a per-node `Vec`): `p` = slice membership, `blocked` =
+            // Redelmeier exclusion set, `untried` = the shared growth buffer,
+            // `in_untried` = O(1) membership of `untried`, `blk_unwind` = the
+            // stack recording which cells each level added to `blocked`.
+            let mut p = CellSet::new(xmax);
             p.insert(seed);
-            let mut blocked: HashSet<Cell> = HashSet::new();
+            let mut blocked = CellSet::new(xmax);
             let mut untried: Vec<Cell> = Vec::new();
+            let mut in_untried = CellSet::new(xmax);
+            let mut blk_unwind: Vec<Cell> = Vec::new();
             for (dx, dy) in NEIGHBOURS {
                 let nb = (seed.0 + dx, seed.1 + dy);
-                if in_wedge(nb) && nb.0 <= xmax && nb > seed && !untried.contains(&nb) {
+                if in_wedge(nb) && nb.0 <= xmax && nb > seed && in_untried.insert(nb) {
                     untried.push(nb);
                 }
             }
@@ -135,8 +200,11 @@ fn enumerate(center: Center, n: usize) -> Count {
                 td,
                 sy,
                 sx - sy,
-                &untried,
+                0,
+                &mut untried,
+                &mut in_untried,
                 &mut blocked,
+                &mut blk_unwind,
                 &mut total,
             );
         }
@@ -144,27 +212,45 @@ fn enumerate(center: Center, n: usize) -> Count {
     total
 }
 
-/// Redelmeier growth from a fixed snapshot `untried` of the frontier.
+/// Redelmeier growth over a **shared** frontier buffer.
 ///
-/// Branch `i` enumerates slices whose next included cell is `untried[i]`;
-/// `untried[0..i]` are excluded for that branch. To keep each slice unique we
-/// also forbid those excluded cells (and every ancestor-excluded cell) from
-/// re-entering the frontier deeper down — the `blocked` set, unwound when the
-/// loop completes so sibling branches above can still use them.
+/// `untried` is one buffer reused down the whole recursion. This level owns
+/// the slice `untried[lo..hi]`, where `hi` is `untried.len()` on entry (no
+/// sibling has appended yet). Branch `pos` enumerates slices whose next
+/// included cell is `untried[pos]`; the still-pending suffix `untried[pos+1..]`
+/// plus that cell's fresh neighbours form the child frontier — appended onto
+/// the same buffer past `hi`, then truncated back to `hi` once the branch
+/// returns, so siblings see exactly the original suffix. This replaces the
+/// per-node `untried[i+1..].to_vec()` (the dominant allocation after
+/// optimization #1) with push/truncate on a buffer whose capacity stabilizes
+/// after the first deep path.
+///
+/// `in_untried` mirrors the buffer's live membership, making the uniqueness
+/// check O(1) instead of a `Vec::contains` scan: a candidate already filtered
+/// against `p` and `blocked` is in `in_untried` iff it is in the live suffix
+/// (every earlier cell is in `p` or `blocked`, hence rejected already), so the
+/// dedup is exactly the original `!child.contains(..)`.
+///
+/// `untried[pos]` is added to `blocked` after its branch — excluding it for
+/// later siblings and their subtrees — and recorded on the shared `blk_unwind`
+/// stack so this level can restore precisely its own additions on exit.
 #[allow(clippy::too_many_arguments)]
 fn grow(
     center: Center,
     n: u64,
     seed: Cell,
     xmax: i32,
-    p: &mut HashSet<Cell>,
+    p: &mut CellSet,
     weight: u64,
     tx: u32,
     td: u32,
     min_y: i32,
     min_gap: i32,
-    untried: &[Cell],
-    blocked: &mut HashSet<Cell>,
+    lo: usize,
+    untried: &mut Vec<Cell>,
+    in_untried: &mut CellSet,
+    blocked: &mut CellSet,
+    blk_unwind: &mut Vec<Cell>,
     total: &mut Count,
 ) {
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
@@ -173,9 +259,10 @@ fn grow(
     if weight + edge_reach_lb(tx, td, min_y, min_gap) > n {
         return;
     }
-    let mut blocked_here: Vec<Cell> = Vec::new();
-    for i in 0..untried.len() {
-        let c = untried[i];
+    let hi = untried.len(); // this level's frontier is untried[lo..hi]
+    let blk_base = blk_unwind.len();
+    for pos in lo..hi {
+        let c = untried[pos];
         let w2 = weight + orbit_size(center, c) as u64;
         if w2 <= n {
             let ntx = tx + u32::from(on_x_axis_edge(c));
@@ -188,20 +275,21 @@ fn grow(
                 }
                 // cannot extend further (weight would exceed n)
             } else {
-                // Child frontier: the still-pending suffix plus c's fresh
-                // neighbours (not in the slice, not blocked, not already
-                // queued).
-                let mut child: Vec<Cell> = untried[i + 1..].to_vec();
+                // Every prior branch truncated back to `hi`, so the buffer
+                // ends exactly at this level's suffix here.
+                debug_assert_eq!(untried.len(), hi);
+                // Append c's fresh neighbours after the suffix (not in the
+                // slice, not blocked, not already queued).
                 for (dx, dy) in NEIGHBOURS {
                     let nb = (c.0 + dx, c.1 + dy);
                     if in_wedge(nb)
                         && nb.0 <= xmax
                         && nb > seed
-                        && !p.contains(&nb)
-                        && !blocked.contains(&nb)
-                        && !child.contains(&nb)
+                        && !p.contains(nb)
+                        && !blocked.contains(nb)
+                        && in_untried.insert(nb)
                     {
-                        child.push(nb);
+                        untried.push(nb);
                     }
                 }
                 grow(
@@ -215,21 +303,31 @@ fn grow(
                     ntd,
                     min_y.min(c.1),
                     min_gap.min(c.0 - c.1),
-                    &child,
+                    pos + 1,
+                    untried,
+                    in_untried,
                     blocked,
+                    blk_unwind,
                     total,
                 );
+                // Drop this branch's appended neighbours, keeping
+                // `in_untried` in lock-step, so siblings see only the suffix.
+                while untried.len() > hi {
+                    let nb = untried.pop().unwrap();
+                    in_untried.remove(nb);
+                }
             }
-            p.remove(&c);
+            p.remove(c);
         }
         // c is now excluded for the remaining branches at this level and
         // everything below them.
         if blocked.insert(c) {
-            blocked_here.push(c);
+            blk_unwind.push(c);
         }
     }
-    for c in blocked_here {
-        blocked.remove(&c);
+    while blk_unwind.len() > blk_base {
+        let c = blk_unwind.pop().unwrap();
+        blocked.remove(c);
     }
 }
 
