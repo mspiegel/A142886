@@ -269,15 +269,33 @@ _No deferred work is currently parked._
       `forbidden`/`xmax`/`in_wedge` invariants out of the `NEIGHBOURS`
       loop. Byte-identical (pure lowering). Expect low single digits;
       measure A/B like the §4.6 entries.
-    - **(C) Analytic short-circuit of exactly-solvable sub-buckets.**
-      Boundary buckets have the *proven* closed form `2^(n/8−1)`
-      (cross-validated, this file's M6-instrumentation note). Replacing
-      those Redelmeier subtrees with the formula is **not** a DP — it
-      sidesteps the §4.7 state-floor entirely. Payoff is bounded by the
-      *time* those buckets cost, which the bucket-timing data puts in the
-      cheap high-`ax` tail (heavy work is ax=1..6, wide/combinatorial, no
-      closed form) — so likely small; measure the tail's time share before
-      building.
+    - **(C) Analytic short-circuit of exactly-solvable sub-buckets —
+      measured; broader than "one bucket", but a diminishing factor.**
+      The proven `s=0` boundary closed form `2^(n/8−1)` is the degenerate
+      end of a *family*: bucket count is a closed form in `ax` for **each
+      fixed slack** `s = n − 8·ax` (these buckets are 1-D staircases + an
+      O(`s`) local perturbation ⇒ a bounded-width transfer matrix
+      legitimately applies — the opposite end of the slack axis from E's
+      2-D blob). Empirically (per-bucket exact counts, `A142886_BUCKET`,
+      `--verify OK`, n=80/88/96): `s=0` → `2^(ax−1)` (proven); `s=8` →
+      `5·ax·2^(ax−3)+1` (fits all three n exactly); `s=16` → degree-2
+      poly·`2^ax` (consistent). `deg(P_s) ≈ s/8`. **Payoff (cumulative
+      node-visits by slack):** capturing `s≤32` (a ≤~5-state matrix) is
+      **14.4% at n=88, 20.9% n=80, 9.8% n=96**; `s≤56` ≈ 31–45%. So the
+      old "very small fraction / one bucket" guess is **wrong at computed
+      n** for any non-trivial cutoff `S*` (a real exact count-preserving
+      ~1.1–1.2× at `s≤32`), but **directionally right asymptotically**:
+      the `s≤S*` share **shrinks ≈0.7×/+8 in n** (mass migrates to the
+      high-slack low-`ax` 2-D core) ⇒ a *diminishing* constant factor, no
+      growth-class change. **Synthesis: C and E are one object along the
+      slack axis** — small `s` = bounded-width, closed-form, correct/easy
+      but cheap & vanishing (C); `s→n` (low `ax`) = unbounded-width 2-D,
+      the ≈1.23ⁿ §4.7 floor (E). No clean cutoff; `S*` trades derivation
+      effort for a shrinking work slice. Verdict: a legitimate exact lever
+      worth ~10–20% **only at the n-range we actually compute** and only
+      if a slack-parameterised recurrence is derived (s=0/8 done above;
+      higher `s` is real algebra, not enumeration). Instrumentation
+      reverted; numbers reproducible (`A142886_BUCKET`).
     - **(D) Post-§4.1 residual-budget feasibility prune — evaluated, NO-GO
       (tier-1 measured).** Hypothesis: since §4.6's `edge_reach_lb` is folded
       out in `SAT=true`, a cheap admissible prune of dead post-§4.1 subtrees
