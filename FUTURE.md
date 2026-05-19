@@ -606,9 +606,28 @@ _No deferred work is currently parked._
         per the standing "measure, don't guess" discipline. **Cumulative
         vs pre-session baseline: G 0.92 × blk_unwind 0.937 × fusion 0.858
         ≈ 0.74 ⇒ ~26% faster**, all single-core, exact, byte-identical.
-        Recommend shipping. Remaining follow-up: lever I (iterative DFS) —
-        intricate; reassess given the running total and diminishing,
-        higher-risk returns.
+      - **FOLLOW-UP S1 — fold `in_untried` into `CellState` (QUEUED
+        state): SHIPPED-candidate (~7%).** Both prior lessons applied at
+        once: `in_untried` is a *redundant* structure ("in the buffer" is
+        derivable) **and** the survivor is the flat-array `CellState`. Add
+        `QUEUED` (in-buffer, undecided) as a 4th byte value; the hot
+        `is_free(nb)` test now subsumes `!p && !blocked && !in_untried` in
+        one read, and the whole `in_untried` `CellSet` + its hot-loop
+        test-and-set + `remove` are deleted (CellSet type removed
+        entirely). Six explicit `debug_assert`-guarded transitions mirror
+        the buffer discipline; the crux — frame-exit unwind is
+        BLOCKED→**QUEUED** (cell stays in the buffer), only truncation
+        does QUEUED→FREE — is exactly right (the asserts fired clean
+        across the deep tests, and the oracle agrees). **Measured (A/B
+        best-of-5, byte-identical to `main` n=0..120, `--verify OK`, tests
+        10/10):** ratio ≈ **0.92–0.93 (~7%)** (0.923 n=80, 0.922 88, 0.932
+        96, 0.931 100/104). **Cumulative vs pre-session: G 0.92 ×
+        blk_unwind 0.937 × fusion 0.858 × S1 ≈0.928 ≈ 0.686 ⇒ ~31%
+        faster.** This is likely the last large *representational* lever —
+        the hot loop is now bounds-checks + one byte read + one byte write
+        + a `Vec` push. Recommend shipping. Only remaining: lever I
+        (iterative DFS) — intricate, call/frame overhead only; diminishing
+        and higher-risk, reassess vs the running total.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global

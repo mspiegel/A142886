@@ -19,68 +19,33 @@
 use crate::symmetry::{orbit_size, Cell, Center};
 use crate::Count;
 
-/// Dense bitset over the bounded wedge cells `(x, y)` with `0 ≤ y ≤ x ≤ xmax`
-/// (DESIGN.md §2; the recursion never produces a cell outside this triangle).
+/// One byte per bounded-wedge cell encoding its full membership: `p`,
+/// `blocked`, **and** `in_untried` are folded into a single state machine
+/// (replaces all three `CellSet` bitsets — no hashing, no bit-twiddling,
+/// one cache-resident array).
 ///
-/// Replaces the per-`grow` `HashSet<Cell>`. Cells are bounded integers, so a
-/// flat bit-array indexed by `x·stride + y` gives O(1) insert/remove with no
-/// hashing and a single allocation per `enumerate` call (reused, not re-grown,
-/// down the whole recursion). Profiling attributed ~63% of run time to SipHash
-/// on these sets; this removes that path. Now backs only `in_untried` (the
-/// slice/`blocked` membership moved to the fused `CellState`), which needs
-/// only `insert`/`remove`. The recursion structure — and every count — is
-/// unchanged.
-struct CellSet {
-    words: Vec<u64>,
-    stride: usize,
-}
-
-impl CellSet {
-    /// Allocate a cleared set covering `0 ≤ x, y ≤ xmax`.
-    fn new(xmax: i32) -> Self {
-        let stride = xmax as usize + 1;
-        let bits = stride * stride;
-        CellSet {
-            words: vec![0u64; bits.div_ceil(64)],
-            stride,
-        }
-    }
-
-    /// Flat bit index of `c`. Caller guarantees `0 ≤ c.1 ≤ c.0 ≤ xmax`
-    /// (every call site checks `in_wedge` and `≤ xmax` first).
-    #[inline]
-    fn index(&self, c: Cell) -> usize {
-        c.0 as usize * self.stride + c.1 as usize
-    }
-
-    /// Set the bit; return `true` iff it was newly set (matches the
-    /// `HashSet::insert` contract the `blocked` bookkeeping relies on).
-    #[inline]
-    fn insert(&mut self, c: Cell) -> bool {
-        let i = self.index(c);
-        let w = &mut self.words[i / 64];
-        let mask = 1u64 << (i % 64);
-        let was_set = *w & mask != 0;
-        *w |= mask;
-        !was_set
-    }
-
-    #[inline]
-    fn remove(&mut self, c: Cell) {
-        let i = self.index(c);
-        self.words[i / 64] &= !(1u64 << (i % 64));
-    }
-}
-
-/// Fused slice-/blocked-membership over the bounded wedge (one byte per
-/// cell). `p` and `blocked` are provably **mutually exclusive** at every
-/// instant — a cell is FREE, in the slice, or Redelmeier-blocked, never
-/// two — so the two separate `CellSet`s collapse into one array, turning
-/// the hot `!p.contains(nb) && !blocked.contains(nb)` test into a single
-/// `is_free` read (one cache line, no bit-twiddling). `in_untried` is
-/// *not* exclusive with these (a chosen/blocked cell stays in the buffer)
-/// and remains its own `CellSet`. Same predicates, fused storage ⇒ every
-/// count unchanged (byte-identical, oracle-verified).
+/// A cell is in exactly one of:
+/// - `FREE`    — not in the slice, not blocked, not in the `untried` buffer;
+/// - `QUEUED`  — physically in the `untried` buffer, awaiting decision;
+/// - `SLICE`   — currently a slice cell (chosen up the call stack);
+/// - `BLOCKED` — Redelmeier-excluded for the current frame's later siblings.
+///
+/// These are mutually exclusive because `in_untried` is only ever *tested*
+/// on cells that already passed `is_free` (FREE), so "in the buffer" is a
+/// clean sub-state of FREE. The lifecycle, mirroring the buffer discipline
+/// exactly (so every count is unchanged — byte-identical, oracle-verified):
+///
+/// ```text
+/// FREE --set_queued--> QUEUED --set_slice--> SLICE --unset_slice--> QUEUED
+/// QUEUED --set_blocked--> BLOCKED --unblock--> QUEUED   (frame-exit unwind)
+/// QUEUED --dequeue--> FREE                              (truncation pop)
+/// FREE --place_seed--> SLICE                            (bucket root only)
+/// ```
+///
+/// The hot `is_free(nb)` test now subsumes `!p.contains && !blocked.contains
+/// && !in_untried` in a single byte read; every transition is
+/// `debug_assert`-guarded so a stray edge is caught in test builds in
+/// addition to the byte-identical oracle.
 struct CellState {
     s: Vec<u8>,
     stride: usize,
@@ -88,8 +53,9 @@ struct CellState {
 
 impl CellState {
     const FREE: u8 = 0;
-    const SLICE: u8 = 1;
-    const BLOCKED: u8 = 2;
+    const QUEUED: u8 = 1;
+    const SLICE: u8 = 2;
+    const BLOCKED: u8 = 3;
 
     fn new(xmax: i32) -> Self {
         let stride = xmax as usize + 1;
@@ -107,24 +73,38 @@ impl CellState {
         self.s[self.idx(c)] == Self::FREE
     }
     #[inline]
-    fn set_slice(&mut self, c: Cell) {
+    fn step(&mut self, c: Cell, from: u8, to: u8) {
         let i = self.idx(c);
-        debug_assert_eq!(self.s[i], Self::FREE);
-        self.s[i] = Self::SLICE;
+        debug_assert_eq!(self.s[i], from);
+        self.s[i] = to;
+    }
+    #[inline]
+    fn place_seed(&mut self, c: Cell) {
+        self.step(c, Self::FREE, Self::SLICE);
+    }
+    #[inline]
+    fn set_queued(&mut self, c: Cell) {
+        self.step(c, Self::FREE, Self::QUEUED);
+    }
+    #[inline]
+    fn set_slice(&mut self, c: Cell) {
+        self.step(c, Self::QUEUED, Self::SLICE);
+    }
+    #[inline]
+    fn unset_slice(&mut self, c: Cell) {
+        self.step(c, Self::SLICE, Self::QUEUED);
     }
     #[inline]
     fn set_blocked(&mut self, c: Cell) {
-        let i = self.idx(c);
-        debug_assert_eq!(self.s[i], Self::FREE);
-        self.s[i] = Self::BLOCKED;
+        self.step(c, Self::QUEUED, Self::BLOCKED);
     }
-    /// Clear back to FREE (used for both slice-remove and blocked-remove;
-    /// the caller's discipline guarantees the cell is currently non-FREE).
     #[inline]
-    fn clear(&mut self, c: Cell) {
-        let i = self.idx(c);
-        debug_assert_ne!(self.s[i], Self::FREE);
-        self.s[i] = Self::FREE;
+    fn unblock(&mut self, c: Cell) {
+        self.step(c, Self::BLOCKED, Self::QUEUED);
+    }
+    #[inline]
+    fn dequeue(&mut self, c: Cell) {
+        self.step(c, Self::QUEUED, Self::FREE);
     }
 }
 
@@ -272,18 +252,18 @@ fn enumerate(center: Center, n: usize) -> Count {
         }
         // Scratch structures allocated once per bucket and reused across
         // the bucket's entire recursion subtree (push/truncate, never a
-        // per-node `Vec`): `st` = fused slice/blocked membership (`p` and
-        // `blocked` collapsed — mutually exclusive), `untried` = the shared
-        // growth buffer, `in_untried` = O(1) membership of `untried`. (The
-        // `blk_unwind` stack is gone — each frame's blocked set is exactly
-        // its frontier window `untried[lo..hi]`, so unwinding scans it.)
+        // per-node `Vec`): `st` = fused FREE/QUEUED/SLICE/BLOCKED state
+        // (`p`, `blocked` *and* `in_untried` collapsed), `untried` = the
+        // shared growth buffer. (`blk_unwind` and the `in_untried` bitset
+        // are gone — each frame's blocked set is exactly its frontier
+        // window `untried[lo..hi]`, and "in the buffer" is the QUEUED state.)
         let mut st = CellState::new(xmax);
-        st.set_slice(seed);
+        st.place_seed(seed);
         let mut untried: Vec<Cell> = Vec::new();
-        let mut in_untried = CellSet::new(xmax);
         for (dx, dy) in NEIGHBOURS {
             let nb = (seed.0 + dx, seed.1 + dy);
-            if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) && in_untried.insert(nb) {
+            if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) && st.is_free(nb) {
+                st.set_queued(nb);
                 untried.push(nb);
             }
         }
@@ -301,7 +281,6 @@ fn enumerate(center: Center, n: usize) -> Count {
                 0,
                 0,
                 &mut untried,
-                &mut in_untried,
                 &mut total,
             );
         } else {
@@ -316,7 +295,6 @@ fn enumerate(center: Center, n: usize) -> Count {
                 seed.0 - seed.1,
                 0,
                 &mut untried,
-                &mut in_untried,
                 &mut total,
             );
         }
@@ -337,17 +315,17 @@ fn enumerate(center: Center, n: usize) -> Count {
 /// optimization #1) with push/truncate on a buffer whose capacity stabilizes
 /// after the first deep path.
 ///
-/// `in_untried` mirrors the buffer's live membership, making the uniqueness
-/// check O(1) instead of a `Vec::contains` scan: a candidate already filtered
-/// against `p` and `blocked` is in `in_untried` iff it is in the live suffix
-/// (every earlier cell is in `p` or `blocked`, hence rejected already), so the
-/// dedup is exactly the original `!child.contains(..)`.
+/// Slice, blocked, and `untried`-buffer membership are one `CellState`
+/// byte per cell (FREE/QUEUED/SLICE/BLOCKED). The uniqueness/dedup check is
+/// the single `st.is_free(nb)` read — it rejects already-queued (QUEUED),
+/// in-slice (SLICE) and excluded (BLOCKED) candidates at once, subsuming
+/// the former `!p && !blocked && !in_untried`.
 ///
-/// `untried[pos]` is added to `blocked` after its branch — excluding it for
-/// later siblings and their subtrees. This frame's blocked additions are
-/// exactly its frontier window `untried[lo..hi]` (every such cell is newly
-/// blocked here — frontier cells enter `untried` only when `!blocked`), so
-/// exit unwinds by scanning that window; no `blk_unwind` stack is needed.
+/// `untried[pos]` is BLOCKED after its branch — excluding it for later
+/// siblings and their subtrees. This frame's blocked additions are exactly
+/// its frontier window `untried[lo..hi]` (every such cell was QUEUED and is
+/// blocked exactly once here), so exit unwinds by scanning that window
+/// (BLOCKED→QUEUED — they stay in the buffer); no `blk_unwind` stack.
 ///
 /// The x-axis sub-condition of §4.1 is met at every bucket root (`tx ≡ 1`,
 /// seed on the x-axis), so it is never tracked; the predicate reduces to the
@@ -361,10 +339,10 @@ fn enumerate(center: Center, n: usize) -> Count {
 /// folds every `!SAT` / `SAT ||` at compile time, so the `SAT == true`
 /// machine code is a hand-stripped fast path (no `edge_reach_lb`, no per-cell
 /// diagonal test, no `td/min_gap` upkeep, unconditional accept) — one source,
-/// zero runtime dispatch. The frontier/`blocked`/`in_untried` discipline is
-/// identical for both, so the generated slice set — and every count — is
-/// unchanged. `td/min_gap` are unused (and DCE'd) when `SAT`; pass 0. `seed`
-/// is always needed for `forbidden` (bucketing is independent of §4.1).
+/// zero runtime dispatch. The frontier/`CellState` discipline is identical
+/// for both, so the generated slice set — and every count — is unchanged.
+/// `td/min_gap` are unused (and DCE'd) when `SAT`; pass 0. `seed` is always
+/// needed for `forbidden` (bucketing is independent of §4.1).
 #[allow(clippy::too_many_arguments)]
 fn grow<const SAT: bool>(
     center: Center,
@@ -377,7 +355,6 @@ fn grow<const SAT: bool>(
     min_gap: i32,
     lo: usize,
     untried: &mut Vec<Cell>,
-    in_untried: &mut CellSet,
     total: &mut Count,
 ) {
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
@@ -414,15 +391,16 @@ fn grow<const SAT: bool>(
                 // ends exactly at this level's suffix here.
                 debug_assert_eq!(untried.len(), hi);
                 // Append c's fresh neighbours after the suffix. `st.is_free`
-                // is the fused `!p.contains && !blocked.contains` (one read).
+                // is the fused `!p && !blocked && !in_untried` (one read);
+                // marking QUEUED replaces `in_untried.insert`.
                 for (dx, dy) in NEIGHBOURS {
                     let nb = (c.0 + dx, c.1 + dy);
                     if in_wedge(nb)
                         && nb.0 <= xmax
                         && !forbidden(nb, seed.0)
                         && st.is_free(nb)
-                        && in_untried.insert(nb)
                     {
+                        st.set_queued(nb);
                         untried.push(nb);
                     }
                 }
@@ -464,7 +442,6 @@ fn grow<const SAT: bool>(
                             0,
                             pos + 1,
                             untried,
-                            in_untried,
                             total,
                         );
                     }
@@ -480,30 +457,29 @@ fn grow<const SAT: bool>(
                         min_gap.min(c.0 - c.1),
                         pos + 1,
                         untried,
-                        in_untried,
                         total,
                     );
                 }
-                // Drop this branch's appended neighbours, keeping
-                // `in_untried` in lock-step, so siblings see only the suffix.
+                // Drop this branch's appended neighbours. They leave the
+                // buffer here ⇒ QUEUED → FREE (the unique "dequeue" site).
                 while untried.len() > hi {
                     let nb = untried.pop().unwrap();
-                    in_untried.remove(nb);
+                    st.dequeue(nb);
                 }
             }
-            st.clear(c); // SLICE → FREE
+            st.unset_slice(c); // SLICE → QUEUED (c is still in the buffer)
         }
-        // c is now excluded for the remaining branches at this level and
-        // everything below them. `c` is provably *newly* blocked here
-        // (frontier cells enter `untried` only when `st.is_free`), and
-        // SLICE↔BLOCKED never overlap, so this is a plain FREE→BLOCKED.
+        // c is now excluded for this frame's later siblings. It was QUEUED
+        // (a frontier cell still in the buffer, or just un-chosen above);
+        // QUEUED → BLOCKED.
         st.set_blocked(c);
     }
     // Unwind this frame's blocks = exactly `untried[lo..hi]` (untouched:
-    // the loop only appends past `hi` and truncates back). Replaces the
-    // `blk_unwind` Vec pop-loop with a window scan.
+    // the loop only appends past `hi` and truncates back). These cells stay
+    // physically in the buffer for an ancestor frame ⇒ BLOCKED → QUEUED
+    // (NOT free — an ancestor's truncation is the only dequeue).
     for pos in lo..hi {
-        st.clear(untried[pos]); // BLOCKED → FREE
+        st.unblock(untried[pos]); // BLOCKED → QUEUED
     }
 }
 
