@@ -420,23 +420,30 @@ _No deferred work is currently parked._
       node-visits per (G)); ≈ 1 ⇒ refuted like F, recorded with numbers.
       Highest-leverage untested idea; run the measurement before any
       build.
-    - **(J) Forced-move chaining (unit-propagation analog) — candidate,
-      cheap measurement first.** When a node's frontier offers exactly
-      one continuation that can still reach weight `n` (or §4.6 forces the
-      next cell), skip the branch node and chain the forced cell directly,
-      collapsing rigid segments into O(1). This is the *runtime*
-      generalisation of why C's `s=0` bucket is `2^(ax−1)` — it captures
-      **every** forced staircase segment anywhere in the tree, not just
-      the boundary bucket, with **no closed-form algebra** (distinct from
-      C) and at interior nodes (distinct from G's last-cell). Exact /
-      count-preserving by construction (a forced move adds no branching).
-      Plausibly meaningful given the measured "rigid staircase +
-      local perturbation" structure, but the payoff is unknown.
-      **Decisive cheap measurement first:** instrument post-§4.1 nodes,
-      report the fraction whose live frontier has exactly one
-      budget-feasible continuation (and the mean forced-chain length).
-      High forced fraction ⇒ a real exact constant factor (skip the
-      degree-1 spine); low ⇒ drop. Measure before any build.
+    - **(J) Forced-move chaining (unit-propagation analog) — measured,
+      NO-GO (premise refuted; I-dominated).** Idea: skip nodes whose
+      frontier offers exactly one budget-feasible continuation and chain
+      the forced cell, hoping to collapse "rigid staircase" segments.
+      Measured post-G (`SAT_FORCED`, n=80/88/96, a(n) byte-identical,
+      `--verify OK`) — per-SAT-node census of `live = #{frontier cells
+      with w+orbit ≤ n}`: **the structural premise is false.** Branching
+      is genuinely spread — `live = 1/2/3` are each ≈23–28%; the `s=0`
+      staircase is *binary* (up/left), a binary tree, **not a forced
+      tunnel**. Only ≈27% of nodes are forced at all; the *chainable*
+      subset (forced-**recursive**: the lone live cell recurses) is just
+      **≈18–20%, declining with n** (19.9→18.9→18.0% at n=80/88/96),
+      vs the dead ≈4% and forced-complete ≈8% (terminal, not chainable).
+      And it is overhead-only with a real correctness burden: a chained
+      node still must replay its `blocked` side-effects (it blocks its
+      overshoot/other frontier cells, which propagate into the child's
+      canonical generation — *unlike* G's R=4 case where `blocked` is
+      provably never read), so chaining removes only the frame/call
+      (~19% of nodes), not the frontier scan or the blocking, and needs
+      a two-state correctness proof. **Lever I (iterative DFS) removes
+      per-node frame/call overhead for 100% of nodes, mechanically, with
+      zero count risk — it strictly dominates J's entire purpose** (as it
+      does the R=8 fold). Do not pursue J; do **I** instead. Throwaway
+      instrumentation reverted; numbers reproducible (`SAT_FORCED`).
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
