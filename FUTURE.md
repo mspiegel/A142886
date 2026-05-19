@@ -515,6 +515,37 @@ _No deferred work is currently parked._
         **Status: GO for a prototype**, behind the byte-identical gate;
         highest-value remaining single-core lever (ceiling ≈ the measured
         ~15–20% true / ≤28% upper bound, minus a few-% gate compare).
+      - **PROTOTYPE RESULT: REFUTED (the crack above was wrong).** Built
+        `grow_k` (fixed y-then-x φ + monotone gate, frontier recomputed
+        φ-sorted per node; §4.6/§4.1/SAT/G preserved verbatim), gated on
+        the byte-identical oracle. It **undercounts ~10× and worsening**
+        (a(88)=129 993 vs 1 112 935; a(120)=12 299 023 vs 267 588 663;
+        first divergence n=16: 4 vs 5) — a systematic over-exclusion, not
+        an edge bug. **Flaw:** "seed is φ-min" is *necessary but not
+        sufficient*; lexicographic Redelmeier also needs the numbering to
+        be **discovery-monotone** (every cell's φ exceeds that of some
+        already-present neighbour on *every* realizing path) so the
+        advancing gate never bars a still-needed cell. A *geometric* φ
+        lacks this: a low-φ cell `d` reachable only *after* a higher-φ
+        connector `c` is permanently barred by the child gate `φ(c)`
+        (since `φ(d)<φ(c)`), killing every slice with that motif — and
+        such motifs multiply with n, exactly the observed growing
+        undercount. The crack talked itself out of this very concern;
+        the empirical oracle confirms the concern was real. **Therefore
+        the docstring's "no cheap analog for an edge-pinned root"
+        pessimism STANDS** (not refuted): the cheap gate requires
+        *discovery-order* numbering, which requires persistent per-cell
+        numbers — the scheme in tension with the shipped shared-buffer /
+        bucket-reset discipline, and itself shown buggy for the n-ary
+        suffix form (see F-era note). Both cheap variants fail for this
+        structure. **K verdict: NO-GO** as a constant-factor lever
+        absent a genuinely new idea reconciling discovery-numbering with
+        the shared buffer (a harder, separate problem — not "just pick a
+        fixed φ"). The ≤28% cost stands measured, but is **not** cheaply
+        recoverable. Prototype reverted; lesson: a paper "theorem" here
+        is not proof — only the byte-identical oracle is (cf. the
+        standing FUTURE.md-is-not-proof principle, applied to my own
+        crack).
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
