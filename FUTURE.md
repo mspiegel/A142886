@@ -448,6 +448,36 @@ _No deferred work is currently parked._
       zero count risk — it strictly dominates J's entire purpose** (as it
       does the R=8 fold). Do not pursue J; do **I** instead. Throwaway
       instrumentation reverted; numbers reproducible (`SAT_FORCED`).
+    - **(K) Revive Redelmeier index-canonicalisation (drop the explicit
+      `blocked` set) — measured ceiling LARGE, but design-gated; the top
+      unexplored single-core prize.** The classic Redelmeier uniqueness
+      rule is an O(1) cell-index test, *not* an explicit excluded-set with
+      push/unwind. This codebase **deliberately traded that away** for the
+      A-rooted x-axis-bucketed scheme (`enumerate.rs` docstring: "the
+      baseline's global lex-min `nb > seed` shortcut is deliberately
+      dropped (no cheap analog for an edge-pinned root; known performance
+      trade — plan O2)"). That rationale is *asserted, not proven* — the
+      one standard Redelmeier optimisation not on this ledger. **Measured
+      cost of the bookkeeping it reintroduced** (the three blocked-only
+      ops isolated behind `#[inline(never)]`, profiled with the v0-symbol
+      + `sample` workflow, n=88, byte-identical to `main` n=0..120,
+      `--verify OK`, ~100% attributed / trustworthy): self-time of
+      `blk_mark` 12.5% + `blk_unwind_level` 9.5% + `blk_contains` 5.6%
+      = **≤ 27.6% of total runtime**. **Upper bound** — the inline
+      barrier inflates these tiny hot bitset ops; true cost realistically
+      ~15–20%, but decisively **not negligible and larger than any single
+      lever found this session** (G ≈ 8%). The per-node teardown
+      (`blk_unwind_level` ≈ 9.5% upper) also partly bounds lever I.
+      **Status:** not a shippable delta — `blocked` is load-bearing for
+      correctness; capturing this prize requires solving the *open design
+      question* the docstring shelved: does a cheap O(1) canonical-index
+      rule exist that is compatible with minimal-x-axis-cell bucketing
+      (so each slice still lands in exactly one bucket, counted once,
+      without the excluded-set)? That is an algorithm-design problem, not
+      a measurement — but the payoff ceiling now justifies spending real
+      design effort on it. Pairs with I (both attack per-node
+      bookkeeping; together they'd compound). Throwaway helpers + driver
+      reverted; reproducible via this note.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
