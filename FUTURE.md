@@ -252,6 +252,56 @@ _No deferred work is currently parked._
     State the claim as: *post-§4.1 is a large, n-saturating ~46% minority of
     grow time*, not "most." (Throwaway `examples/prof88.rs` driver since
     removed; rebuild from this note to reproduce.)
+  - **Candidate single-core levers for the post-§4.1 body (B, C) — not yet
+    evaluated.** Recorded so they are not lost; exact / count-preserving by
+    construction. Bounded by the measured ~46% post-§4.1 time share (and by
+    Amdahl on the pre-§4.1 ~54%), so each is at best a low-single-digit
+    constant-factor win that stacks with the others — not a growth-class
+    change (the §4.5/§4.7 floor stands; A — `rayon` over independent
+    post-§4.1 subtrees — remains the open parallel lever, deferred per
+    "single-core only for now").
+    - **(B) Constant-factor work inside `grow::<true>`.** It is ~46% of
+      runtime, ~100% self-time, zero allocation — the cleanest micro-arch
+      target left after the const-generic fold. Ideas: grow boundary-first
+      to minimize the live `untried` working set (smaller hot bitset ⇒
+      fewer `in_untried`/`blocked` probes, better cache residency);
+      branchless membership; cache-line-packed `CellSet`; hoist the
+      `forbidden`/`xmax`/`in_wedge` invariants out of the `NEIGHBOURS`
+      loop. Byte-identical (pure lowering). Expect low single digits;
+      measure A/B like the §4.6 entries.
+    - **(C) Analytic short-circuit of exactly-solvable sub-buckets.**
+      Boundary buckets have the *proven* closed form `2^(n/8−1)`
+      (cross-validated, this file's M6-instrumentation note). Replacing
+      those Redelmeier subtrees with the formula is **not** a DP — it
+      sidesteps the §4.7 state-floor entirely. Payoff is bounded by the
+      *time* those buckets cost, which the bucket-timing data puts in the
+      cheap high-`ax` tail (heavy work is ax=1..6, wide/combinatorial, no
+      closed form) — so likely small; measure the tail's time share before
+      building.
+    - **(D) Post-§4.1 residual-budget feasibility prune — evaluated, NO-GO
+      (tier-1 measured).** Hypothesis: since §4.6's `edge_reach_lb` is folded
+      out in `SAT=true`, a cheap admissible prune of dead post-§4.1 subtrees
+      (no weight-exactly-`n` completion) might recover work. Measured the
+      *ceiling* first (project discipline, like §4.7's state-floor): throwaway
+      instrumentation on `grow::<true>` tagging each node dead iff its subtree
+      adds 0, and sizing every *maximal* dead root (dead node whose parent is
+      alive / pre-§4.1). Self-checks: `pruned_visits == dead_nodes` exactly
+      ∀n, `--verify OK`, `a(n)` byte-identical. Result, n=76..100 (`SAT_CEILING`
+      env): **deadFrac ≈ 32–33%, stable in n** — so D is *not* inert (this
+      *refutes* the a-priori column-span-style guess that it would be ~0;
+      worth having measured). **But the dead mass has no exploitable
+      structure:** mean maximal-dead-subtree ≈ **1.3 nodes**; at n=100,
+      2,162,603 / 2,174,825 dead roots are ≤8 nodes and **0 exceed 512**.
+      The ~32% dead visits are the *shallowest, cheapest* nodes — subtrees
+      that self-terminate in ~1 step via the existing `w2≤n` gate + frontier
+      exhaustion. So a **free perfect oracle** saves ≈0.3 node-visits per
+      fire, and any *admissible* detector must be an ≈O(`n`) connected-
+      reachable-weight flood fill (every O(1) box/parity bound is inert —
+      the wedge is `xmax=n`, the §4.6 column-span lesson), i.e. detection
+      cost ≫ savings and savings ≈ 0. The §4.7 "detection ≥ savings" trap
+      in a sharper form. **Do not re-propose** any post-§4.1 deadness prune
+      (the dead subtrees are individually ~1 node — there is nothing fat to
+      lop). Instrumentation reverted; numbers reproducible from this note.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
