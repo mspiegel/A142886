@@ -84,12 +84,13 @@ fn in_wedge(c: Cell) -> bool {
 
 /// Admissible lower bound on the *extra* orbit-weight any completion still
 /// needs in order to satisfy §4.1 condition 2 (touch both wedge edges).
-/// `min_y` = smallest `y`; `min_gap` = smallest `x − y` over the slice.
+/// `min_gap` = smallest `x − y` over the slice.
 ///
-/// **x-axis term** (moot for the shipped A-rooted scheme — the pinned root
-/// is on the x-axis so `tx > 0` always ⇒ 0; kept for the general lemma): if
-/// `y = 0` is not yet touched, reaching it needs ≥ `min_y` new cells, ≥ 4
-/// weight each.
+/// **Only the diagonal term remains.** The §4.1 x-axis sub-condition is met
+/// at every bucket root — the A-rooted scheme pins every seed on the x-axis
+/// (`seed = (ax, 0)` ⇒ `tx ≥ 1` at every node) — so the old x-axis term
+/// `wx = if tx>0 {0} else {4·min_y}` was provably 0 everywhere and `min_y`
+/// pure dead state; both are dropped.
 ///
 /// **Diagonal term — single joint cell-budget + gap bound.** If the
 /// diagonal is not yet touched (`td == 0` ⇔ `min_gap ≥ 1`), reaching it
@@ -111,8 +112,7 @@ fn in_wedge(c: Cell) -> bool {
 /// buckets (cell `n ≡ 1` apex / vertex 2×2 core) the root is on the diagonal
 /// ⇒ `td > 0` ⇒ this term is 0.
 ///
-/// The two excursions may share cells, so the sound combined bound is `max`,
-/// never the sum. **Soundness is per-node admissibility, not monotonicity:**
+/// **Soundness is per-node admissibility, not monotonicity:**
 /// `weight + edge_reach_lb` is *not* monotone down the recursion (the
 /// diagonal term can fall by 8 while `weight` rises only 4), but if
 /// `weight + lb > n` at a node then every completion's total
@@ -120,20 +120,20 @@ fn in_wedge(c: Cell) -> bool {
 /// diagonal), so the subtree holds no weight-`n` slice — independent of
 /// descendants. (DESIGN §4.6(b).)
 #[inline]
-fn edge_reach_lb(tx: u32, td: u32, min_y: i32, min_gap: i32) -> u64 {
+fn edge_reach_lb(td: u32, min_gap: i32) -> u64 {
     // `td == 0` ⇒ no gap-0 cell ⇒ `min_gap ≥ 1`, so `8·min_gap − 4 ≥ 4`
     // and the `u64` subtraction cannot underflow.
     debug_assert!(td > 0 || min_gap >= 1, "td == 0 must imply min_gap ≥ 1");
-    let wx = if tx > 0 { 0 } else { 4 * min_y as u64 };
-    let wd = if td > 0 { 0 } else { 8 * (min_gap as u64) - 4 };
-    wx.max(wd)
+    if td > 0 {
+        0
+    } else {
+        8 * (min_gap as u64) - 4
+    }
 }
 
-#[inline]
-fn on_x_axis_edge(c: Cell) -> bool {
-    c.1 == 0
-}
-
+// (`on_x_axis_edge` removed: the A-rooted scheme pins every seed on the
+// x-axis, so the x-axis touch is met at every bucket root — `tx ≡ 1` — and
+// the predicate is never tested. `forbidden` checks `c.1 == 0` directly.)
 #[inline]
 fn on_diagonal_edge(c: Cell) -> bool {
     c.0 == c.1
@@ -202,10 +202,12 @@ fn enumerate(center: Center, n: usize) -> Count {
         if ws > n {
             continue;
         }
-        let tx = u32::from(on_x_axis_edge(seed));
+        // `tx ≡ 1`: every bucket seed is `(ax, 0)`, on the x-axis, so the
+        // §4.1 x-axis sub-condition is satisfied at the root of every bucket
+        // and the predicate reduces to the diagonal touch (`td`).
         let td = u32::from(on_diagonal_edge(seed));
         if ws == n {
-            if tx > 0 && td > 0 {
+            if td > 0 {
                 total += 1;
             }
             continue; // any extension exceeds n
@@ -214,7 +216,7 @@ fn enumerate(center: Center, n: usize) -> Count {
         // completion cannot touch both wedge edges within the budget, this
         // bucket's whole subtree is dead (§4.1 condition 2). `A` is on the
         // x-axis so only the diagonal term (min_gap = ax) can bind.
-        if ws + edge_reach_lb(tx, td, seed.1, seed.0 - seed.1) > n {
+        if ws + edge_reach_lb(td, seed.0 - seed.1) > n {
             continue;
         }
         // All four scratch structures are allocated once per bucket and
@@ -236,9 +238,9 @@ fn enumerate(center: Center, n: usize) -> Count {
                 untried.push(nb);
             }
         }
-        if tx > 0 && td > 0 {
+        if td > 0 {
             // Seed already satisfies §4.1 (ax==0: apex / 2×2 core) — straight
-            // into the SAT specialization (tx/td/min_y/min_gap unused ⇒ 0).
+            // into the SAT specialization (td/min_gap unused there ⇒ 0).
             grow::<true>(
                 center,
                 n,
@@ -246,8 +248,6 @@ fn enumerate(center: Center, n: usize) -> Count {
                 xmax,
                 &mut p,
                 ws,
-                0,
-                0,
                 0,
                 0,
                 0,
@@ -265,9 +265,7 @@ fn enumerate(center: Center, n: usize) -> Count {
                 xmax,
                 &mut p,
                 ws,
-                tx,
                 td,
-                seed.1,
                 seed.0 - seed.1,
                 0,
                 &mut untried,
@@ -304,19 +302,22 @@ fn enumerate(center: Center, n: usize) -> Count {
 /// later siblings and their subtrees — and recorded on the shared `blk_unwind`
 /// stack so this level can restore precisely its own additions on exit.
 ///
-/// **`const SAT`** specializes on whether §4.1 (touch both wedge edges) is
-/// already satisfied. §4.1 is monotone (DESIGN §4.6(b): `tx`,`td` only grow),
-/// so once satisfied `edge_reach_lb(tx>0,td>0,..) == 0` (the prune can never
-/// fire) and the acceptance gate is always true. `SAT == false` is the general
-/// path; `SAT == true` is the post-satisfaction fast path. The compiler
-/// monomorphizes two copies and folds every `!SAT` / `SAT ||` at compile time,
-/// so the `SAT == true` machine code is a hand-stripped fast path (no
-/// `edge_reach_lb`, no per-cell edge tests, no `tx/td/min_y/min_gap` upkeep,
-/// unconditional accept) — one source, zero runtime dispatch. The
-/// frontier/`blocked`/`in_untried` discipline is identical for both, so the
-/// generated slice set — and every count — is unchanged. `tx/td/min_y/min_gap`
-/// are unused (and DCE'd) when `SAT`; pass 0. `seed` is always needed for
-/// `forbidden` (bucketing is independent of §4.1).
+/// The x-axis sub-condition of §4.1 is met at every bucket root (`tx ≡ 1`,
+/// seed on the x-axis), so it is never tracked; the predicate reduces to the
+/// diagonal touch `td` and its budget term is `edge_reach_lb(td, min_gap)`.
+///
+/// **`const SAT`** specializes on whether the diagonal is already touched
+/// (the remaining half of §4.1). It is monotone (`td` only grows), so once
+/// `td > 0` the `edge_reach_lb` prune is provably inert and the accept gate
+/// is always true. `SAT == false` is the general path; `SAT == true` is the
+/// post-satisfaction fast path. The compiler monomorphizes two copies and
+/// folds every `!SAT` / `SAT ||` at compile time, so the `SAT == true`
+/// machine code is a hand-stripped fast path (no `edge_reach_lb`, no per-cell
+/// diagonal test, no `td/min_gap` upkeep, unconditional accept) — one source,
+/// zero runtime dispatch. The frontier/`blocked`/`in_untried` discipline is
+/// identical for both, so the generated slice set — and every count — is
+/// unchanged. `td/min_gap` are unused (and DCE'd) when `SAT`; pass 0. `seed`
+/// is always needed for `forbidden` (bucketing is independent of §4.1).
 #[allow(clippy::too_many_arguments)]
 fn grow<const SAT: bool>(
     center: Center,
@@ -325,9 +326,7 @@ fn grow<const SAT: bool>(
     xmax: i32,
     p: &mut CellSet,
     weight: u64,
-    tx: u32,
     td: u32,
-    min_y: i32,
     min_gap: i32,
     lo: usize,
     untried: &mut Vec<Cell>,
@@ -341,7 +340,7 @@ fn grow<const SAT: bool>(
     // because `weight + edge_reach_lb(..)` only grows down the recursion.
     // Skipped entirely in the SAT specialization (it would return 0 — the
     // predicate is already satisfied — so the whole check is folded out).
-    if !SAT && weight + edge_reach_lb(tx, td, min_y, min_gap) > n {
+    if !SAT && weight + edge_reach_lb(td, min_gap) > n {
         return;
     }
     let hi = untried.len(); // this level's frontier is untried[lo..hi]
@@ -350,21 +349,19 @@ fn grow<const SAT: bool>(
         let c = untried[pos];
         let w2 = weight + orbit_size(center, c) as u64;
         if w2 <= n {
-            // SAT: unused (folded away); (1,1) keeps the shared accept/
-            // dispatch expressions trivially true with no edge-class tests.
-            let (ntx, ntd) = if SAT {
-                (1, 1)
+            // tx ≡ 1 globally (seed on x-axis), so §4.1 reduces to `td`.
+            // SAT: ntd unused (folded away); 1 keeps the shared accept/
+            // dispatch expressions trivially true with no edge-class test.
+            let ntd = if SAT {
+                1
             } else {
-                (
-                    tx + u32::from(on_x_axis_edge(c)),
-                    td + u32::from(on_diagonal_edge(c)),
-                )
+                td + u32::from(on_diagonal_edge(c))
             };
             p.insert(c);
             if w2 == n {
-                // §4.1: connected by construction; needs both wedge edges
-                // (always true on the SAT path ⇒ unconditional there).
-                if SAT || (ntx > 0 && ntd > 0) {
+                // §4.1: connected by construction; x-axis is met at the seed,
+                // so only the diagonal touch (`td`) gates (unconditional SAT).
+                if SAT || ntd > 0 {
                     *total += 1;
                 }
                 // cannot extend further (weight would exceed n)
@@ -386,7 +383,7 @@ fn grow<const SAT: bool>(
                         untried.push(nb);
                     }
                 }
-                if SAT || (ntx > 0 && ntd > 0) {
+                if SAT || ntd > 0 {
                     // §4.1 satisfied (or already) — monotone, so the whole
                     // child subtree takes the SAT specialization. (On the SAT
                     // path this is the only arm; the else is folded out.)
@@ -397,8 +394,6 @@ fn grow<const SAT: bool>(
                         xmax,
                         p,
                         w2,
-                        0,
-                        0,
                         0,
                         0,
                         pos + 1,
@@ -416,9 +411,7 @@ fn grow<const SAT: bool>(
                         xmax,
                         p,
                         w2,
-                        ntx,
                         ntd,
-                        min_y.min(c.1),
                         min_gap.min(c.0 - c.1),
                         pos + 1,
                         untried,
