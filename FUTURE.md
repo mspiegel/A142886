@@ -353,6 +353,32 @@ _No deferred work is currently parked._
       cut; this probe supplies the missing measurement for the slice-level
       cut (mult ≡ 1) so the "any DP" closure is now empirically anchored at
       both ends, not asserted. Instrumentation reverted.
+    - **(G) Tail-fold the R=4 level (Redelmeier "last-cell") — GO
+      candidate, B-family, measured.** Post-§4.1 node-visits by remaining
+      budget `R = n − weight` (`SAT_RHIST`, n=80/88/96, `--verify OK`,
+      a(n) byte-identical), stable in n: **R=4 = 50.4% of all SAT
+      node-visits with 0.00% child-spawns** — pure non-recursive
+      leaf-loops (a `grow()` call + `hi`/`blk_base`/`blk_unwind`
+      bookkeeping wrapping a loop that just counts weight-4 frontier
+      cells). Fold them into the parent: when a node would recurse into a
+      child with entry `R=4`, instead add `#{weight-4 cells in that
+      child's frontier}` directly. **Provably count-preserving** — an R=4
+      node has no recursive children, so its internal `blocked` inserts
+      affect nothing else; its value is exactly that frontier count. Wipes
+      the call/setup overhead for ~half of all post-§4.1 nodes. Extending
+      to R=8 covers cumulatively 74.4% of nodes (frontier-iters 75.0%) but
+      only 18.3% of child-spawns, and adds the rare connected-weight-4-pair
+      case with its own blocked-discipline correctness burden — smaller
+      marginal gain, more risk; do R=4 first. **Ceiling/limits:** this is
+      recursion-overhead amortization, *not* algorithmic — the expensive
+      neighbour-expansion (`child_spawns`) is 82% at `R≥12` and untouched,
+      and the R≤8 frontier-iteration work (75%) is *relocated* into the
+      parent, not removed. So expect a B-class constant factor (same lever
+      family as the shipped ~4% const-generic split), exact, count-
+      preserving, stacking with B; not a growth-class change. Unlike
+      D/E/F this is a **GO** (standard Redelmeier optimization; the R=4
+      fold is the safe, high-value form). Instrumentation reverted;
+      numbers reproducible (`SAT_RHIST`).
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
