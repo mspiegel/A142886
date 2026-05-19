@@ -227,6 +227,31 @@ _No deferred work is currently parked._
   matters, neutral where it doesn't. The const-generic form measured
   identical to a hand-written two-function version, so it carries the gain
   with **no code duplication** (one `const SAT` parameter). Tier-1 measured.
+  - **CORRECTION (tier-1 measured, independent sampling profiler).** The
+    *"rises slightly with n because deeper post-satisfaction subtrees
+    amortize better"* clause is **directionally right but plateaus — it does
+    not extrapolate to a majority**, and the underlying "most nodes ⇒ most
+    time" leap is false. Method: shipped release binary (LTO, `cgu=1`) built
+    `-C symbol-mangling-version=v0` so the two monomorphizations are distinct
+    symbols (`…enumerate4growKb0_` = `grow::<false>` = pre-§4.1,
+    `…growKb1_` = `grow::<true>` = post-§4.1); macOS `sample(1)` at 1 ms,
+    self-time (top-of-stack — the correct metric for a recursive fn),
+    ~18k grow samples/point, `count(n)` looped to steady state. **Measured
+    post-§4.1 share of grow CPU time:** n=44 32.8%, 52 37.6%, 60 38.8%,
+    68 40.5%, 76 44.0%, 84 44.8%, 88 45.4%, 92 45.3%, 96 46.9%, 100 46.0%
+    (`grow` is 90.8% of total at n=44 — the small-n fixed-overhead caveat,
+    quantified — rising to 100% by n≥88). So the share **rises steeply
+    through the mid-range then saturates at ~46% for n≥84** — a stable
+    *minority*; it never approaches or crosses 50%. Consequences: (1) the
+    ~4% gain's growth with n is real only in the n≈80–112 window the A/B
+    used and should **plateau, not keep widening** — the optimized fraction
+    stops growing by n≈85; (2) the `gw` "§4.1 satisfied very early ⇒ most
+    nodes run the stripped path" observation is about *node count*, and
+    does **not** imply most *time* — pre-§4.1 stays the larger time sink
+    (~54%) at every n=44..100 even though post-SAT dominates by node count.
+    State the claim as: *post-§4.1 is a large, n-saturating ~46% minority of
+    grow time*, not "most." (Throwaway `examples/prof88.rs` driver since
+    removed; rebuild from this note to reproduce.)
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
