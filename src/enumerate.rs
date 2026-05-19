@@ -22,13 +22,14 @@ use crate::Count;
 /// Dense bitset over the bounded wedge cells `(x, y)` with `0 ≤ y ≤ x ≤ xmax`
 /// (DESIGN.md §2; the recursion never produces a cell outside this triangle).
 ///
-/// Replaces the per-`grow` `HashSet<Cell>` used for the slice (`p`) and the
-/// Redelmeier excluded set (`blocked`). Cells are bounded integers, so a flat
-/// bit-array indexed by `x·stride + y` gives O(1) insert/contains/remove with
-/// no hashing and a single allocation per `enumerate` call (reused, not
-/// re-grown, down the whole recursion). Profiling attributed ~63% of run time
-/// to SipHash on these two sets; this removes that path. The recursion
-/// structure — and therefore every count — is unchanged.
+/// Replaces the per-`grow` `HashSet<Cell>`. Cells are bounded integers, so a
+/// flat bit-array indexed by `x·stride + y` gives O(1) insert/remove with no
+/// hashing and a single allocation per `enumerate` call (reused, not re-grown,
+/// down the whole recursion). Profiling attributed ~63% of run time to SipHash
+/// on these sets; this removes that path. Now backs only `in_untried` (the
+/// slice/`blocked` membership moved to the fused `CellState`), which needs
+/// only `insert`/`remove`. The recursion structure — and every count — is
+/// unchanged.
 struct CellSet {
     words: Vec<u64>,
     stride: usize,
@@ -50,15 +51,6 @@ impl CellSet {
     #[inline]
     fn index(&self, c: Cell) -> usize {
         c.0 as usize * self.stride + c.1 as usize
-    }
-
-    // Unused since the p/blocked fusion (in_untried needs only insert/
-    // remove); kept for the bitset API completeness.
-    #[allow(dead_code)]
-    #[inline]
-    fn contains(&self, c: Cell) -> bool {
-        let i = self.index(c);
-        self.words[i / 64] & (1u64 << (i % 64)) != 0
     }
 
     /// Set the bit; return `true` iff it was newly set (matches the
