@@ -478,6 +478,43 @@ _No deferred work is currently parked._
       design effort on it. Pairs with I (both attack per-node
       bookkeeping; together they'd compound). Throwaway helpers + driver
       reverted; reproducible via this note.
+      - **DESIGN CRACK (the open question largely resolved — a cheap
+        analog *does* exist).** The docstring's "no cheap analog for an
+        edge-pinned root" conflates two things: the *old* shortcut was
+        `nb > seed`, a **lexicographic-coordinate** test (needs the seed
+        to be the coordinate-min — broken by bucketing, since a bucket-`ax`
+        slice may hold off-axis cells coordinate-smaller than `(ax,0)`).
+        But the standard O(1) Redelmeier mechanism is not that — it is a
+        **monotone threshold ("gate")** under *any* fixed total order φ in
+        which the root is the minimum, and we are free to choose φ.
+        **Choose φ(x,y) = y·(xmax+1) + x** (order by y then x; same shape
+        as `CellSet::index`, axes swapped). **Theorem:** the bucket seed
+        `A=(ax,0)` is then the strict φ-minimum of every bucket-`ax`
+        slice — any other allowed cell is either `y=0,x>ax` (φ=x>ax;
+        `x<ax` is forbidden) or `y≥1` (φ ≥ xmax+1 > ax). ∎ So classic
+        threshold-Redelmeier applies to the pinned root, and the three
+        measured-expensive ops collapse: `blk_contains(nb)` → `φ(nb) ≥
+        gate` (one compare, no set); `blk_mark(c)` → `gate =
+        max(gate, φ(c)+1)`; `blk_unwind_level` → **deleted** (gate is a
+        stack local, restored free on return). **Bonus:** init `gate =
+        φ(A) = ax`; then `φ ≥ gate` *also subsumes `forbidden` exactly*
+        (forbidden ≡ `(x,0), x<ax` ≡ φ<ax; no `y≥1` cell has φ<ax), so
+        `blocked` + `blk_unwind` + `forbidden` (+ most of `in_untried`)
+        all fold into one integer compare. Counts are *expected*
+        byte-identical (textbook lexicographic Redelmeier; bucket
+        partition unchanged) — the verifiable oracle. **Not a free
+        lunch / where the risk is:** the gate trick requires the frontier
+        to be consumed in **φ-order** (today it is BFS/insertion order),
+        so this is design-substantive, not a mechanical refactor like I;
+        the traversal-order change is exactly what could alter counts and
+        must be validated byte-identical (`--verify` + n=0..120 diff vs
+        pre-change `main`), and its interaction with the shipped
+        shared-frontier-buffer truncation needs care (φ is a pure
+        coordinate function with no persistent numbering state — that is
+        what keeps it compatible, unlike discovery-order numbering).
+        **Status: GO for a prototype**, behind the byte-identical gate;
+        highest-value remaining single-core lever (ceiling ≈ the measured
+        ~15–20% true / ≤28% upper bound, minus a few-% gate compare).
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
