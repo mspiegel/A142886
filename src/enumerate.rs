@@ -52,6 +52,9 @@ impl CellSet {
         c.0 as usize * self.stride + c.1 as usize
     }
 
+    // Unused since the p/blocked fusion (in_untried needs only insert/
+    // remove); kept for the bitset API completeness.
+    #[allow(dead_code)]
     #[inline]
     fn contains(&self, c: Cell) -> bool {
         let i = self.index(c);
@@ -74,6 +77,62 @@ impl CellSet {
     fn remove(&mut self, c: Cell) {
         let i = self.index(c);
         self.words[i / 64] &= !(1u64 << (i % 64));
+    }
+}
+
+/// Fused slice-/blocked-membership over the bounded wedge (one byte per
+/// cell). `p` and `blocked` are provably **mutually exclusive** at every
+/// instant — a cell is FREE, in the slice, or Redelmeier-blocked, never
+/// two — so the two separate `CellSet`s collapse into one array, turning
+/// the hot `!p.contains(nb) && !blocked.contains(nb)` test into a single
+/// `is_free` read (one cache line, no bit-twiddling). `in_untried` is
+/// *not* exclusive with these (a chosen/blocked cell stays in the buffer)
+/// and remains its own `CellSet`. Same predicates, fused storage ⇒ every
+/// count unchanged (byte-identical, oracle-verified).
+struct CellState {
+    s: Vec<u8>,
+    stride: usize,
+}
+
+impl CellState {
+    const FREE: u8 = 0;
+    const SLICE: u8 = 1;
+    const BLOCKED: u8 = 2;
+
+    fn new(xmax: i32) -> Self {
+        let stride = xmax as usize + 1;
+        CellState {
+            s: vec![Self::FREE; stride * stride],
+            stride,
+        }
+    }
+    #[inline]
+    fn idx(&self, c: Cell) -> usize {
+        c.0 as usize * self.stride + c.1 as usize
+    }
+    #[inline]
+    fn is_free(&self, c: Cell) -> bool {
+        self.s[self.idx(c)] == Self::FREE
+    }
+    #[inline]
+    fn set_slice(&mut self, c: Cell) {
+        let i = self.idx(c);
+        debug_assert_eq!(self.s[i], Self::FREE);
+        self.s[i] = Self::SLICE;
+    }
+    #[inline]
+    fn set_blocked(&mut self, c: Cell) {
+        let i = self.idx(c);
+        debug_assert_eq!(self.s[i], Self::FREE);
+        self.s[i] = Self::BLOCKED;
+    }
+    /// Clear back to FREE (used for both slice-remove and blocked-remove;
+    /// the caller's discipline guarantees the cell is currently non-FREE).
+    #[inline]
+    fn clear(&mut self, c: Cell) {
+        let i = self.idx(c);
+        debug_assert_ne!(self.s[i], Self::FREE);
+        self.s[i] = Self::FREE;
     }
 }
 
@@ -221,14 +280,13 @@ fn enumerate(center: Center, n: usize) -> Count {
         }
         // Scratch structures allocated once per bucket and reused across
         // the bucket's entire recursion subtree (push/truncate, never a
-        // per-node `Vec`): `p` = slice membership, `blocked` = Redelmeier
-        // exclusion set, `untried` = the shared growth buffer, `in_untried`
-        // = O(1) membership of `untried`. (PROTOTYPE-K: the `blk_unwind`
-        // stack is gone — each frame's blocked set is exactly its frontier
-        // window `untried[lo..hi]`, so unwinding scans that window.)
-        let mut p = CellSet::new(xmax);
-        p.insert(seed);
-        let mut blocked = CellSet::new(xmax);
+        // per-node `Vec`): `st` = fused slice/blocked membership (`p` and
+        // `blocked` collapsed — mutually exclusive), `untried` = the shared
+        // growth buffer, `in_untried` = O(1) membership of `untried`. (The
+        // `blk_unwind` stack is gone — each frame's blocked set is exactly
+        // its frontier window `untried[lo..hi]`, so unwinding scans it.)
+        let mut st = CellState::new(xmax);
+        st.set_slice(seed);
         let mut untried: Vec<Cell> = Vec::new();
         let mut in_untried = CellSet::new(xmax);
         for (dx, dy) in NEIGHBOURS {
@@ -245,14 +303,13 @@ fn enumerate(center: Center, n: usize) -> Count {
                 n,
                 seed,
                 xmax,
-                &mut p,
+                &mut st,
                 ws,
                 0,
                 0,
                 0,
                 &mut untried,
                 &mut in_untried,
-                &mut blocked,
                 &mut total,
             );
         } else {
@@ -261,14 +318,13 @@ fn enumerate(center: Center, n: usize) -> Count {
                 n,
                 seed,
                 xmax,
-                &mut p,
+                &mut st,
                 ws,
                 td,
                 seed.0 - seed.1,
                 0,
                 &mut untried,
                 &mut in_untried,
-                &mut blocked,
                 &mut total,
             );
         }
@@ -323,14 +379,13 @@ fn grow<const SAT: bool>(
     n: u64,
     seed: Cell,
     xmax: i32,
-    p: &mut CellSet,
+    st: &mut CellState,
     weight: u64,
     td: u32,
     min_gap: i32,
     lo: usize,
     untried: &mut Vec<Cell>,
     in_untried: &mut CellSet,
-    blocked: &mut CellSet,
     total: &mut Count,
 ) {
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
@@ -354,7 +409,7 @@ fn grow<const SAT: bool>(
             } else {
                 td + u32::from(on_diagonal_edge(c))
             };
-            p.insert(c);
+            st.set_slice(c);
             if w2 == n {
                 // §4.1: connected by construction; x-axis is met at the seed,
                 // so only the diagonal touch (`td`) gates (unconditional SAT).
@@ -366,15 +421,14 @@ fn grow<const SAT: bool>(
                 // Every prior branch truncated back to `hi`, so the buffer
                 // ends exactly at this level's suffix here.
                 debug_assert_eq!(untried.len(), hi);
-                // Append c's fresh neighbours after the suffix (not in the
-                // slice, not blocked, not already queued).
+                // Append c's fresh neighbours after the suffix. `st.is_free`
+                // is the fused `!p.contains && !blocked.contains` (one read).
                 for (dx, dy) in NEIGHBOURS {
                     let nb = (c.0 + dx, c.1 + dy);
                     if in_wedge(nb)
                         && nb.0 <= xmax
                         && !forbidden(nb, seed.0)
-                        && !p.contains(nb)
-                        && !blocked.contains(nb)
+                        && st.is_free(nb)
                         && in_untried.insert(nb)
                     {
                         untried.push(nb);
@@ -412,14 +466,13 @@ fn grow<const SAT: bool>(
                             n,
                             seed,
                             xmax,
-                            p,
+                            st,
                             w2,
                             0,
                             0,
                             pos + 1,
                             untried,
                             in_untried,
-                            blocked,
                             total,
                         );
                     }
@@ -429,14 +482,13 @@ fn grow<const SAT: bool>(
                         n,
                         seed,
                         xmax,
-                        p,
+                        st,
                         w2,
                         ntd,
                         min_gap.min(c.0 - c.1),
                         pos + 1,
                         untried,
                         in_untried,
-                        blocked,
                         total,
                     );
                 }
@@ -447,21 +499,19 @@ fn grow<const SAT: bool>(
                     in_untried.remove(nb);
                 }
             }
-            p.remove(c);
+            st.clear(c); // SLICE → FREE
         }
         // c is now excluded for the remaining branches at this level and
-        // everything below them. (PROTOTYPE-K: `c` is provably *newly*
-        // blocked here — frontier cells enter `untried` only when
-        // `!blocked.contains`, so the old `if blocked.insert` guard +
-        // `blk_unwind` push are redundant; this frame's blocked set is
-        // exactly its frontier window `untried[lo..hi]`.)
-        blocked.insert(c);
+        // everything below them. `c` is provably *newly* blocked here
+        // (frontier cells enter `untried` only when `st.is_free`), and
+        // SLICE↔BLOCKED never overlap, so this is a plain FREE→BLOCKED.
+        st.set_blocked(c);
     }
-    // PROTOTYPE-K: unwind this frame's blocks = exactly `untried[lo..hi]`
-    // (untouched: the loop only appends past `hi` and truncates back).
-    // Replaces the `blk_unwind` Vec pop-loop with a window scan.
+    // Unwind this frame's blocks = exactly `untried[lo..hi]` (untouched:
+    // the loop only appends past `hi` and truncates back). Replaces the
+    // `blk_unwind` Vec pop-loop with a window scan.
     for pos in lo..hi {
-        blocked.remove(untried[pos]);
+        st.clear(untried[pos]); // BLOCKED → FREE
     }
 }
 

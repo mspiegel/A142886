@@ -588,11 +588,27 @@ _No deferred work is currently parked._
         pointed to. **Stacks with the shipped G: ≈14% vs the pre-session
         baseline** (0.92 × 0.937). So lever K, declared design-gated then
         prototype-refuted in its *eliminate-the-info* form, **does yield a
-        real exact win in its *represent-the-info-free* form.** Open
-        compounding follow-ups (unchanged): fuse `p`/`blocked`/`in_untried`
-        into one multi-state array (kills the `blk_contains` 5.6% read),
-        then lever I. Recommend shipping this; it is the second banked
-        single-core win of the program after G.
+        real exact win in its *represent-the-info-free* form.**
+      - **FOLLOW-UP 2a — `p`+`blocked` array fusion: SHIPPED-candidate
+        (~14%, far above the ~2–4% estimate).** `p` and `blocked` are
+        provably mutually exclusive (FREE→SLICE→FREE→BLOCKED→FREE per
+        cell), so the two `CellSet` bitsets collapse into one `u8`-per-cell
+        `CellState` {FREE,SLICE,BLOCKED}; the hot
+        `!p.contains && !blocked.contains` becomes one `is_free` byte read.
+        **Measured (A/B best-of-5, byte-identical to `main` n=0..120,
+        `--verify OK`, tests 10/10, debug state-transition asserts pass):**
+        ratio (fusion / main) **0.871 (n=80), 0.862 (88), 0.858 (96),
+        0.854 (100), 0.858 (104) — ≈14%**. The estimate was far too
+        conservative: the win compounds across *every* `p`/`blocked`
+        op (each becomes a single byte load/store vs CellSet
+        word-read-modify-write + bit math, in one cache-resident array
+        not two), not just the one fused read — corrected by measurement
+        per the standing "measure, don't guess" discipline. **Cumulative
+        vs pre-session baseline: G 0.92 × blk_unwind 0.937 × fusion 0.858
+        ≈ 0.74 ⇒ ~26% faster**, all single-core, exact, byte-identical.
+        Recommend shipping. Remaining follow-up: lever I (iterative DFS) —
+        intricate; reassess given the running total and diminishing,
+        higher-risk returns.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
