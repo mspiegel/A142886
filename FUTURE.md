@@ -396,30 +396,34 @@ _No deferred work is currently parked._
       Safe to do; measure A/B like the §4.6 entries. (Standard Redelmeier
       implementation technique; complements G — G removes ~half the
       *nodes*, I removes the *per-node* recursion cost of the rest.)
-    - **(H) Local-window endgame table — the principled generalisation
-      of G; UNTESTED, decisive measurement defined.** G short-circuits
-      the last level (R=4); H tabulates the last *k* budget levels
-      (R ≤ 8, 12, …): the completion count for the bottom of the tree
-      depends only on the **small local neighbourhood of the growth
-      frontier** (+ in-window blocked/forbidden cells), not the whole
-      slice. Precompute a finite table `(local pattern, R) → #completions`
-      and replace the bottom *k* levels with a lookup. **Does not
-      contradict F:** F measured the *global* slice key (multiplicity
-      ≡ 1.0 — no reuse); H bets on a *windowed* key, which the measured
-      structure (weight-8-dominated, minimal edge skeleton ⇒ low-variety
-      local tips) makes plausibly high-reuse. F never tested the local
-      key — this is a genuinely distinct, open question. **Correctness
-      caveat (verify, do not assume):** the window must capture every
-      blocked/forbidden cell that can influence an in-window completion;
-      cross-window `blocked` interactions would break count-preservation
-      — the thing to prove before building. **Decisive experiment (the
-      F probe, localised):** instrument the bottom *k* levels, key on the
-      windowed neighbourhood only, report distinct/total for n=80/88/96.
-      multiplicity ≫ 1 ⇒ H is a real, exact, possibly large lever (a
-      table replacing the bushy bottom — note R≤8 is 74% of post-§4.1
-      node-visits per (G)); ≈ 1 ⇒ refuted like F, recorded with numbers.
-      Highest-leverage untested idea; run the measurement before any
-      build.
+    - **(H) Local-window endgame table — measured, NO-GO (premise
+      *confirmed* but no bounded table + memo is the §4.7 trap).** G
+      short-circuits the last level (R=4); H asked whether the bottom
+      layers' completion count is reusable via a *local windowed* key
+      even though F killed the *global* slice key (mult ≡ 1.0). Probe
+      (`SAT_WIN`, post-G, n=80/88/96, a(n) byte-identical, `--verify
+      OK`): a **sound** sufficient-statistic key — the labelled box of
+      radius ⌈R/4⌉+1 around the frontier (per-cell weight-class +
+      slice/blocked/forbidden/wall; translation- & order-invariant given
+      the labels). **The distinguishing premise is TRUE:** unlike F's
+      global mult ≡ 1.0, the windowed key *repeats* — R=8 mult **1.9 / 2.3
+      / 2.7** (n=80/88/96, rising in n); R=12 mult 1.3 / 1.4 / 1.6. So
+      F-vs-H was a real distinction, validated. **But it still does not
+      pay, two independent ways:** (1) *No finite table* — `distinct`
+      ≈ 0.4 × node-count and grows **exponentially** in n (R=8: 36k →
+      120k → 396k), so the windowed state space is not bounded; the
+      "precompute a fixed endgame table, O(1) lookup" form is dead.
+      (2) *Runtime memo = the §4.7 trap, localised* — post-G an R=8
+      node's own work is tiny (count weight-8 frontier cells + the
+      G-folded weight-4 handling, O(few)), whereas computing the window
+      key is a radius-3 box scan + hash (≈30–100 cells) — **the key
+      costs ≥ the work it would memoise**, paid on 100% of nodes to cache
+      ~56% repeats (mult 2–3 ≪ break-even). Net loss, same shape as
+      §4.7/D. The realistic per-node-overhead goal is again **I-
+      dominated** (mechanical, no key, no map, zero count risk; the
+      cross-window-`blocked` correctness obligation also never has to be
+      discharged). **Do not build H.** Throwaway probe reverted; numbers
+      reproducible (`SAT_WIN`).
     - **(J) Forced-move chaining (unit-propagation analog) — measured,
       NO-GO (premise refuted; I-dominated).** Idea: skip nodes whose
       frontier offers exactly one budget-feasible continuation and chain
