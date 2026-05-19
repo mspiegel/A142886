@@ -68,15 +68,31 @@ impl CellState {
     fn idx(&self, c: Cell) -> usize {
         c.0 as usize * self.stride + c.1 as usize
     }
+    // SAFETY contract shared by every `s` accessor below (coordinate and
+    // `_at` family alike): the index is always `< s.len()`. Every cell that
+    // reaches an accessor first passed the `in_wedge` + `nb.0 <= xmax` +
+    // `forbidden` guards, so `0 ≤ y ≤ x ≤ xmax`; with `stride = xmax + 1`,
+    // `idx = x*stride + y ≤ xmax*stride + xmax < stride*stride = s.len()`.
+    // The `_at` callers additionally `debug_assert_eq!(ni, st.idx(nb))`, so
+    // the add-derived index is proven equal to the coordinate form in test
+    // builds. Each accessor `debug_assert!`s the bound too, so any stray
+    // index is caught by the debug oracle / test suite before this `unsafe`
+    // is ever trusted in release.
     #[inline]
     fn is_free(&self, c: Cell) -> bool {
-        self.s[self.idx(c)] == Self::FREE
+        let i = self.idx(c);
+        debug_assert!(i < self.s.len(), "idx {i} OOB (len {})", self.s.len());
+        // SAFETY: see the contract above.
+        *unsafe { self.s.get_unchecked(i) } == Self::FREE
     }
     #[inline]
     fn step(&mut self, c: Cell, from: u8, to: u8) {
         let i = self.idx(c);
-        debug_assert_eq!(self.s[i], from);
-        self.s[i] = to;
+        debug_assert!(i < self.s.len(), "idx {i} OOB (len {})", self.s.len());
+        // SAFETY: see the contract above.
+        let slot = unsafe { self.s.get_unchecked_mut(i) };
+        debug_assert_eq!(*slot, from);
+        *slot = to;
     }
     // ── Index (`*_at`) family ─────────────────────────────────────────
     // The `_at` suffix means "operate on a precomputed flat index
@@ -87,12 +103,17 @@ impl CellState {
     // in effect to the coordinate form `*(x)`.
     #[inline]
     fn is_free_at(&self, i: usize) -> bool {
-        self.s[i] == Self::FREE
+        debug_assert!(i < self.s.len(), "idx {i} OOB (len {})", self.s.len());
+        // SAFETY: see the contract on `is_free`.
+        *unsafe { self.s.get_unchecked(i) } == Self::FREE
     }
     #[inline]
     fn step_at(&mut self, i: usize, from: u8, to: u8) {
-        debug_assert_eq!(self.s[i], from);
-        self.s[i] = to;
+        debug_assert!(i < self.s.len(), "idx {i} OOB (len {})", self.s.len());
+        // SAFETY: see the contract on `is_free`.
+        let slot = unsafe { self.s.get_unchecked_mut(i) };
+        debug_assert_eq!(*slot, from);
+        *slot = to;
     }
     #[inline]
     fn set_queued_at(&mut self, i: usize) {
