@@ -228,6 +228,53 @@ fn forbidden(c: Cell, ax: i32) -> bool {
 
 const NEIGHBOURS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
+/// Hot-loop specialization of `symmetry::orbit_size` that assumes the input is
+/// a wedge frontier cell from `untried` (so `0 ≤ y ≤ x`) **and** is not the
+/// cell-centered apex `(0, 0)`. Both preconditions are structural to `grow`'s
+/// `untried` discipline:
+///
+/// - Wedge: every push into `untried` first passes `in_wedge(nb)`, which is
+///   exactly `0 ≤ y ≤ x`. So the `representative()` fold collapses to the
+///   identity — no `|x|`/`|y|`/`max`/`min` work.
+/// - Non-apex (cell-centered only; vertex-centered has no apex): bucket
+///   `ax > 0` makes `(0, 0)` `forbidden` (`y == 0 && x < ax`) so it is never
+///   queued; the `ax == 0` bucket has `(0, 0)` as its **seed** — `place_seed`
+///   sends it straight from FREE to SLICE, never QUEUED, and the only path
+///   back into `untried` would be `is_free((0,0))` from a neighbour, which
+///   fails (it is SLICE). So no `untried[*]` is ever `(0, 0)`.
+///
+/// Reduces `orbit_size` to a single compare + csel (VERTEX) / a pair of
+/// compares (cell-centered), saving the `eor abs` or `cmp+cneg+cmp+cneg+
+/// max+min+csel` chain that the general `orbit_size` produces (binary
+/// inspection: ≈2 inst/iter VERTEX, ≈7 inst/iter cell-centered).
+#[inline]
+fn wedge_orbit_size_no_apex<const VERTEX: bool>(c: Cell) -> u64 {
+    debug_assert!(
+        c.0 >= 0 && c.1 >= 0 && c.1 <= c.0,
+        "wedge_orbit_size_no_apex: {c:?} not in wedge"
+    );
+    debug_assert!(
+        VERTEX || c != (0, 0),
+        "wedge_orbit_size_no_apex: cell-centered apex (0,0) must not reach untried"
+    );
+    if VERTEX {
+        // Vertex-centered: diagonal cells (incl. 2×2 core `(0,0)`) → 4, else 8.
+        if c.0 == c.1 {
+            4
+        } else {
+            8
+        }
+    } else {
+        // Cell-centered, non-apex: x-axis edge (`y == 0`, `x > 0`) or diagonal
+        // edge (`x == y > 0`) → 4, else interior → 8.
+        if c.1 == 0 || c.0 == c.1 {
+            4
+        } else {
+            8
+        }
+    }
+}
+
 /// Count D8-symmetric polyominoes of `n` cells for one center type, by
 /// enumerating connected wedge slices of total orbit-weight `n`.
 ///
@@ -405,9 +452,6 @@ fn grow<const SAT: bool, const VERTEX: bool>(
     untried: &mut Vec<Cell>,
     total: &mut Count,
 ) {
-    // Prototype lever #4: compile-time-constant center (see `enumerate`).
-    // Folds away the per-cell `cbz` and the dead center path in `orbit_size`.
-    let center = if VERTEX { Center::Vertex } else { Center::Cell };
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
     // can ever touch both wedge edges within the remaining budget. Sound
     // because `weight + edge_reach_lb(..)` only grows down the recursion.
@@ -424,7 +468,7 @@ fn grow<const SAT: bool, const VERTEX: bool>(
     for pos in lo..hi {
         let c = untried[pos];
         let ci = st.idx(c);
-        let w2 = weight + orbit_size(center, c) as u64;
+        let w2 = weight + wedge_orbit_size_no_apex::<VERTEX>(c);
         if w2 <= n {
             // tx ≡ 1 globally (seed on x-axis), so §4.1 reduces to `td`.
             // SAT: ntd unused (folded away); 1 keeps the shared accept/
@@ -484,7 +528,7 @@ fn grow<const SAT: bool, const VERTEX: bool>(
                         // the blocked/unwind bookkeeping. Provably
                         // count-identical to the recursion.
                         for k in (pos + 1)..untried.len() {
-                            if orbit_size(center, untried[k]) as u64 == 4 {
+                            if wedge_orbit_size_no_apex::<VERTEX>(untried[k]) == 4 {
                                 *total += 1;
                             }
                         }
