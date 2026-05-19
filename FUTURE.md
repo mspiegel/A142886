@@ -546,6 +546,36 @@ _No deferred work is currently parked._
         is not proof — only the byte-identical oracle is (cf. the
         standing FUTURE.md-is-not-proof principle, applied to my own
         crack).
+      - **STRATEGY PIVOT (different angle — represent, don't eliminate).**
+        Generalising the refutation: the gate fails for *every* static
+        cell order, not just y-then-x — any U-shaped slice has a deep
+        cell `d` whose only in-slice route to the seed doubles back
+        through a connector `c` with `φ(c) > φ(d)`; the child gate `φ(c)`
+        then permanently bars `d`. No static numbering is discovery-
+        monotone for all connected slices; the literature's O(1)
+        "no blocked set" Redelmeier is the **fixed-finite-board** variant,
+        inapplicable to single-seed connected growth in the cone. So the
+        blocked information is genuinely needed — *don't try to delete
+        it; make storing it free.* **Identity:** at every `grow` frame
+        the cells pushed to `blk_unwind` are *exactly* its frontier
+        window `untried[lo..hi]`, all newly inserted (frontier cells
+        enter `untried` only when `!blocked.contains`; intervening
+        sibling blocks are unwound; the parent's own line-459 blocks are
+        on lower untried indices = different cells via `in_untried`
+        dedup). Hence `blk_unwind` is redundant: drop the `Vec`, make
+        line 459 an unconditional `blocked.insert(c)`, and unwind with
+        `for pos in lo..hi { blocked.remove(untried[pos]); }`. Removes a
+        whole `Vec` + its push/pop from the two heaviest measured bands
+        (`blk_mark` 12.5% + `blk_unwind_level` 9.5%) and is **byte-
+        identical by construction** (a representation identity, not an
+        algorithm change) — gated by the oracle (the last "proof" was
+        wrong, so this is a hypothesis to verify, not a guarantee; but
+        unlike the gate, if correct it is the *same* enumeration).
+        Compounding follow-ups: fuse `p`/`blocked`/`in_untried` into one
+        multi-state cell array (one hot-loop read instead of three; kills
+        the standalone `blk_contains` 5.6%); and lever I on top. Status:
+        prototyping the `blk_unwind` elimination behind the byte-identical
+        gate + A/B (same rigor as G).
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
