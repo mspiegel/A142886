@@ -385,17 +385,29 @@ _No deferred work is currently parked._
       extension (cum. 74.4% of nodes, but only 18.3% of child-spawns +
       the rare connected-weight-4-pair correctness burden) remains a
       smaller, riskier follow-on, not done.
-    - **(I) Recursion → explicit-stack iterative DFS — candidate,
-      B-family, not yet built.** The sampling profile is ~46% of total
-      time, ~100% self-time, in a deeply recursive `grow`. Replacing the
-      recursion with an explicit work-stack removes the per-node call
-      prologue/epilogue and the `hi`/`blk_base`/`blk_unwind` frame setup,
-      and typically improves register allocation. Mechanical, **no count
-      risk** (structure-preserving transform), exact; a B-class constant
-      factor that **stacks with B and G**. Not a growth-class change.
-      Safe to do; measure A/B like the §4.6 entries. (Standard Redelmeier
-      implementation technique; complements G — G removes ~half the
-      *nodes*, I removes the *per-node* recursion cost of the rest.)
+    - **(I) Recursion → explicit-stack iterative DFS — measured, NO-GO
+      (~19% *slower*).** Hypothesis: an explicit work-stack removes
+      per-node call prologue/epilogue / frame setup. **Stage 1** built:
+      `grow_sat_iter`, an explicit-stack iterative form of the `SAT=true`
+      specialization (the simpler ~39%-of-runtime half; two-mode frame
+      machine — fresh vs resumed-after-child; `SatFrame{weight,lo,hi,pos}`;
+      every `CellState` transition mirrored). **Correctness: perfect** —
+      `a(n)` byte-identical to `main` n=0..120, `--verify OK`, tests
+      10/10, the `CellState::step` debug asserts (the iterative
+      transform's net) clean across the deep tests. **But A/B (best-of-5)
+      = ~1.18–1.21× → ≈19% SLOWER** (1.208 n=80, 1.193 88, 1.188 96,
+      1.184 100, 1.185 104). The recursion is *already optimal*: depth is
+      only ≈n/4, frames are tiny (args in registers), and LLVM's codegen
+      of the recursive form beats a hand-rolled `Vec<SatFrame>` + resume
+      flag + per-spin `stack.last()` re-borrow. The profile checkpoint
+      *predicted this* (~100% self-time in `grow`, **no separable
+      call-overhead signal** ⇒ nothing for I to recover; the manual
+      machine only *adds* overhead the compiler had removed). Pre-committed
+      kill criterion (byte-identical but ratio ≥ ~0.99 ⇒ NO-GO, don't
+      start Stage 2) **triggered → Stage 2 not attempted; I rejected.**
+      Reverted; src == `main`. **Do not re-propose**: call/frame overhead
+      is not the bottleneck here and iterative regresses it. This closes
+      the single-core optimisation program at the banked ~31%.
     - **(H) Local-window endgame table — measured, NO-GO (premise
       *confirmed* but no bounded table + memo is the §4.7 trap).** G
       short-circuits the last level (R=4); H asked whether the bottom
@@ -625,9 +637,13 @@ _No deferred work is currently parked._
         blk_unwind 0.937 × fusion 0.858 × S1 ≈0.928 ≈ 0.686 ⇒ ~31%
         faster.** This is likely the last large *representational* lever —
         the hot loop is now bounds-checks + one byte read + one byte write
-        + a `Vec` push. Recommend shipping. Only remaining: lever I
-        (iterative DFS) — intricate, call/frame overhead only; diminishing
-        and higher-risk, reassess vs the running total.
+        + a `Vec` push. Lever I (iterative DFS) was subsequently built
+        (Stage 1) and **measured NO-GO (~19% slower** — see (I)); the
+        recursion is already optimal. **The single-core optimisation
+        program is closed at the banked ~31% (G + blk_unwind + fusion +
+        S1), all exact/byte-identical.** Beyond this: only `rayon`-over-
+        buckets (parallel, count-preserving — separate axis) and the
+        unchanged exponential `#nodes` wall (§4.5/§4.7).
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
