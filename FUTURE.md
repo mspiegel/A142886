@@ -408,6 +408,26 @@ _No deferred work is currently parked._
       Reverted; src == `main`. **Do not re-propose**: call/frame overhead
       is not the bottleneck here and iterative regresses it. This closes
       the single-core optimisation program at the banked ~31%.
+    - **Pre-§4.1 `td`-elimination (`grow_unsat`) — measured, NO-GO
+      (byte-identical but a ~0% wash).** `td ≡ 0` throughout the
+      `SAT==false` monomorph (a gap-0 cell touches the diagonal ⇒ SAT, so
+      `grow::<false>` never carries `td>0`). Extracted `grow_unsat`: the
+      pre-§4.1 path with `td` dropped — `edge_reach_lb(0,min_gap)` folded
+      to branchless `8·min_gap−4`, `ntd>0` → a `gap==0` test, `gap=c.0−c.1`
+      CSE'd across the diagonal test / dispatch / `min_gap` update, one
+      fewer hot recursive-call parameter. Correctness perfect (byte-
+      identical to `main` n=0..120, `--verify OK`, tests 10/10, the new
+      `min_gap≥1` + `CellState` debug asserts clean across the deep
+      tests). **A/B best-of-5 ≈ 1.000/0.988/0.997/0.998/1.002
+      (n=80/88/96/100/104) — mean ≈0.997, indistinguishable from noise;
+      n=104 slightly slower.** The compiler already handles the dead
+      parameter / const-foldable branch; manual specialization buys
+      nothing measurable. Pre-committed kill criterion (byte-identical,
+      ratio ≥ ~0.99) triggered → reverted, src == `main`. Reinforces the
+      lever-I finding: post-G/blk_unwind/fusion/S1 the per-node work is
+      effectively irreducible — representational/specialization micro-
+      levers no longer move the needle (I −19%, this ~0%). **Do not
+      re-propose pre-§4.1 `td`/branch micro-specialization.**
     - **(H) Local-window endgame table — measured, NO-GO (premise
       *confirmed* but no bounded table + memo is the §4.7 trap).** G
       short-circuits the last level (R=4); H asked whether the bottom
