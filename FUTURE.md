@@ -573,9 +573,26 @@ _No deferred work is currently parked._
         unlike the gate, if correct it is the *same* enumeration).
         Compounding follow-ups: fuse `p`/`blocked`/`in_untried` into one
         multi-state cell array (one hot-loop read instead of three; kills
-        the standalone `blk_contains` 5.6%); and lever I on top. Status:
-        prototyping the `blk_unwind` elimination behind the byte-identical
-        gate + A/B (same rigor as G).
+        the standalone `blk_contains` 5.6%); and lever I on top.
+      - **RESULT — SHIPPED-candidate (the identity holds; ~6%).** The
+        `blk_unwind` `Vec` is removed: line 459 is now an unconditional
+        `blocked.insert(c)`, and each frame unwinds via
+        `for pos in lo..hi { blocked.remove(untried[pos]); }`. **Measured
+        (release, controlled A/B, best-of-5):** `a(n)` **byte-identical to
+        `main` (G) for n=0..120**; `--verify OK` (n≤68 vs b-file/`REFERENCE`);
+        tests **10/10**. **~6% faster, non-eroding:** ratio (K-bu / main)
+        0.969 (n=80), 0.931 (88), 0.937 (96), 0.942 (100), 0.942 (104).
+        The frame-blocked-set ≡ `untried[lo..hi]` identity is empirically
+        confirmed (byte-identical), so this is the *same enumeration* with
+        a free representation — the strategy that the gate refutation
+        pointed to. **Stacks with the shipped G: ≈14% vs the pre-session
+        baseline** (0.92 × 0.937). So lever K, declared design-gated then
+        prototype-refuted in its *eliminate-the-info* form, **does yield a
+        real exact win in its *represent-the-info-free* form.** Open
+        compounding follow-ups (unchanged): fuse `p`/`blocked`/`in_untried`
+        into one multi-state array (kills the `blk_contains` 5.6% read),
+        then lever I. Recommend shipping this; it is the second banked
+        single-core win of the program after G.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global

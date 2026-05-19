@@ -219,19 +219,18 @@ fn enumerate(center: Center, n: usize) -> Count {
         if ws + edge_reach_lb(td, seed.0 - seed.1) > n {
             continue;
         }
-        // All four scratch structures are allocated once per bucket and
-        // reused across the bucket's entire recursion subtree
-        // (push/truncate, never a per-node `Vec`): `p` = slice membership,
-        // `blocked` = Redelmeier exclusion set, `untried` = the shared
-        // growth buffer, `in_untried` = O(1) membership of `untried`,
-        // `blk_unwind` = the stack recording which cells each level added to
-        // `blocked`.
+        // Scratch structures allocated once per bucket and reused across
+        // the bucket's entire recursion subtree (push/truncate, never a
+        // per-node `Vec`): `p` = slice membership, `blocked` = Redelmeier
+        // exclusion set, `untried` = the shared growth buffer, `in_untried`
+        // = O(1) membership of `untried`. (PROTOTYPE-K: the `blk_unwind`
+        // stack is gone — each frame's blocked set is exactly its frontier
+        // window `untried[lo..hi]`, so unwinding scans that window.)
         let mut p = CellSet::new(xmax);
         p.insert(seed);
         let mut blocked = CellSet::new(xmax);
         let mut untried: Vec<Cell> = Vec::new();
         let mut in_untried = CellSet::new(xmax);
-        let mut blk_unwind: Vec<Cell> = Vec::new();
         for (dx, dy) in NEIGHBOURS {
             let nb = (seed.0 + dx, seed.1 + dy);
             if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) && in_untried.insert(nb) {
@@ -254,7 +253,6 @@ fn enumerate(center: Center, n: usize) -> Count {
                 &mut untried,
                 &mut in_untried,
                 &mut blocked,
-                &mut blk_unwind,
                 &mut total,
             );
         } else {
@@ -271,7 +269,6 @@ fn enumerate(center: Center, n: usize) -> Count {
                 &mut untried,
                 &mut in_untried,
                 &mut blocked,
-                &mut blk_unwind,
                 &mut total,
             );
         }
@@ -299,8 +296,10 @@ fn enumerate(center: Center, n: usize) -> Count {
 /// dedup is exactly the original `!child.contains(..)`.
 ///
 /// `untried[pos]` is added to `blocked` after its branch — excluding it for
-/// later siblings and their subtrees — and recorded on the shared `blk_unwind`
-/// stack so this level can restore precisely its own additions on exit.
+/// later siblings and their subtrees. This frame's blocked additions are
+/// exactly its frontier window `untried[lo..hi]` (every such cell is newly
+/// blocked here — frontier cells enter `untried` only when `!blocked`), so
+/// exit unwinds by scanning that window; no `blk_unwind` stack is needed.
 ///
 /// The x-axis sub-condition of §4.1 is met at every bucket root (`tx ≡ 1`,
 /// seed on the x-axis), so it is never tracked; the predicate reduces to the
@@ -332,7 +331,6 @@ fn grow<const SAT: bool>(
     untried: &mut Vec<Cell>,
     in_untried: &mut CellSet,
     blocked: &mut CellSet,
-    blk_unwind: &mut Vec<Cell>,
     total: &mut Count,
 ) {
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
@@ -344,7 +342,6 @@ fn grow<const SAT: bool>(
         return;
     }
     let hi = untried.len(); // this level's frontier is untried[lo..hi]
-    let blk_base = blk_unwind.len();
     for pos in lo..hi {
         let c = untried[pos];
         let w2 = weight + orbit_size(center, c) as u64;
@@ -423,7 +420,6 @@ fn grow<const SAT: bool>(
                             untried,
                             in_untried,
                             blocked,
-                            blk_unwind,
                             total,
                         );
                     }
@@ -441,7 +437,6 @@ fn grow<const SAT: bool>(
                         untried,
                         in_untried,
                         blocked,
-                        blk_unwind,
                         total,
                     );
                 }
@@ -455,14 +450,18 @@ fn grow<const SAT: bool>(
             p.remove(c);
         }
         // c is now excluded for the remaining branches at this level and
-        // everything below them.
-        if blocked.insert(c) {
-            blk_unwind.push(c);
-        }
+        // everything below them. (PROTOTYPE-K: `c` is provably *newly*
+        // blocked here — frontier cells enter `untried` only when
+        // `!blocked.contains`, so the old `if blocked.insert` guard +
+        // `blk_unwind` push are redundant; this frame's blocked set is
+        // exactly its frontier window `untried[lo..hi]`.)
+        blocked.insert(c);
     }
-    while blk_unwind.len() > blk_base {
-        let c = blk_unwind.pop().unwrap();
-        blocked.remove(c);
+    // PROTOTYPE-K: unwind this frame's blocks = exactly `untried[lo..hi]`
+    // (untouched: the loop only appends past `hi` and truncates back).
+    // Replaces the `blk_unwind` Vec pop-loop with a window scan.
+    for pos in lo..hi {
+        blocked.remove(untried[pos]);
     }
 }
 
