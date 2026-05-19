@@ -379,6 +379,58 @@ _No deferred work is currently parked._
       D/E/F this is a **GO** (standard Redelmeier optimization; the R=4
       fold is the safe, high-value form). Instrumentation reverted;
       numbers reproducible (`SAT_RHIST`).
+    - **(I) Recursion → explicit-stack iterative DFS — candidate,
+      B-family, not yet built.** The sampling profile is ~46% of total
+      time, ~100% self-time, in a deeply recursive `grow`. Replacing the
+      recursion with an explicit work-stack removes the per-node call
+      prologue/epilogue and the `hi`/`blk_base`/`blk_unwind` frame setup,
+      and typically improves register allocation. Mechanical, **no count
+      risk** (structure-preserving transform), exact; a B-class constant
+      factor that **stacks with B and G**. Not a growth-class change.
+      Safe to do; measure A/B like the §4.6 entries. (Standard Redelmeier
+      implementation technique; complements G — G removes ~half the
+      *nodes*, I removes the *per-node* recursion cost of the rest.)
+    - **(H) Local-window endgame table — the principled generalisation
+      of G; UNTESTED, decisive measurement defined.** G short-circuits
+      the last level (R=4); H tabulates the last *k* budget levels
+      (R ≤ 8, 12, …): the completion count for the bottom of the tree
+      depends only on the **small local neighbourhood of the growth
+      frontier** (+ in-window blocked/forbidden cells), not the whole
+      slice. Precompute a finite table `(local pattern, R) → #completions`
+      and replace the bottom *k* levels with a lookup. **Does not
+      contradict F:** F measured the *global* slice key (multiplicity
+      ≡ 1.0 — no reuse); H bets on a *windowed* key, which the measured
+      structure (weight-8-dominated, minimal edge skeleton ⇒ low-variety
+      local tips) makes plausibly high-reuse. F never tested the local
+      key — this is a genuinely distinct, open question. **Correctness
+      caveat (verify, do not assume):** the window must capture every
+      blocked/forbidden cell that can influence an in-window completion;
+      cross-window `blocked` interactions would break count-preservation
+      — the thing to prove before building. **Decisive experiment (the
+      F probe, localised):** instrument the bottom *k* levels, key on the
+      windowed neighbourhood only, report distinct/total for n=80/88/96.
+      multiplicity ≫ 1 ⇒ H is a real, exact, possibly large lever (a
+      table replacing the bushy bottom — note R≤8 is 74% of post-§4.1
+      node-visits per (G)); ≈ 1 ⇒ refuted like F, recorded with numbers.
+      Highest-leverage untested idea; run the measurement before any
+      build.
+    - **(J) Forced-move chaining (unit-propagation analog) — candidate,
+      cheap measurement first.** When a node's frontier offers exactly
+      one continuation that can still reach weight `n` (or §4.6 forces the
+      next cell), skip the branch node and chain the forced cell directly,
+      collapsing rigid segments into O(1). This is the *runtime*
+      generalisation of why C's `s=0` bucket is `2^(ax−1)` — it captures
+      **every** forced staircase segment anywhere in the tree, not just
+      the boundary bucket, with **no closed-form algebra** (distinct from
+      C) and at interior nodes (distinct from G's last-cell). Exact /
+      count-preserving by construction (a forced move adds no branching).
+      Plausibly meaningful given the measured "rigid staircase +
+      local perturbation" structure, but the payoff is unknown.
+      **Decisive cheap measurement first:** instrument post-§4.1 nodes,
+      report the fraction whose live frontier has exactly one
+      budget-feasible continuation (and the mean forced-chain length).
+      High forced fraction ⇒ a real exact constant factor (skip the
+      degree-1 spine); low ⇒ drop. Measure before any build.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
