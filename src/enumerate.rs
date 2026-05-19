@@ -232,10 +232,16 @@ const NEIGHBOURS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 /// enumerating connected wedge slices of total orbit-weight `n`.
 ///
 /// Returns 0 for `n == 0` (the empty polyomino is a caller-side convention).
-fn enumerate(center: Center, n: usize) -> Count {
+fn enumerate<const VERTEX: bool>(n: usize) -> Count {
     if n == 0 {
         return 0;
     }
+    // Prototype lever #4: `center` is now a compile-time constant (one
+    // monomorphization per center, like `const SAT`). After monomorphization
+    // this `if VERTEX` folds, so every inlined `orbit_size(center, _)` /
+    // `center == Center::Cell` constant-propagates — the per-cell `cbz`
+    // center branch and the dead center path are eliminated from `grow`.
+    let center = if VERTEX { Center::Vertex } else { Center::Cell };
     let n = n as u64;
     // Any cell of a weight-≤n connected wedge slice has coordinate ≤ n
     // (a slice reaching column X within W needs ≥ X cells, each weight ≥ 1).
@@ -315,8 +321,7 @@ fn enumerate(center: Center, n: usize) -> Count {
         if td > 0 {
             // Seed already satisfies §4.1 (ax==0: apex / 2×2 core) — straight
             // into the SAT specialization (td/min_gap unused there ⇒ 0).
-            grow::<true>(
-                center,
+            grow::<true, VERTEX>(
                 n,
                 seed,
                 xmax,
@@ -329,8 +334,7 @@ fn enumerate(center: Center, n: usize) -> Count {
                 &mut total,
             );
         } else {
-            grow::<false>(
-                center,
+            grow::<false, VERTEX>(
                 n,
                 seed,
                 xmax,
@@ -389,8 +393,7 @@ fn enumerate(center: Center, n: usize) -> Count {
 /// `td/min_gap` are unused (and DCE'd) when `SAT`; pass 0. `seed` is always
 /// needed for `forbidden` (bucketing is independent of §4.1).
 #[allow(clippy::too_many_arguments)]
-fn grow<const SAT: bool>(
-    center: Center,
+fn grow<const SAT: bool, const VERTEX: bool>(
     n: u64,
     seed: Cell,
     xmax: i32,
@@ -402,6 +405,9 @@ fn grow<const SAT: bool>(
     untried: &mut Vec<Cell>,
     total: &mut Count,
 ) {
+    // Prototype lever #4: compile-time-constant center (see `enumerate`).
+    // Folds away the per-cell `cbz` and the dead center path in `orbit_size`.
+    let center = if VERTEX { Center::Vertex } else { Center::Cell };
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
     // can ever touch both wedge edges within the remaining budget. Sound
     // because `weight + edge_reach_lb(..)` only grows down the recursion.
@@ -483,8 +489,7 @@ fn grow<const SAT: bool>(
                             }
                         }
                     } else {
-                        grow::<true>(
-                            center,
+                        grow::<true, VERTEX>(
                             n,
                             seed,
                             xmax,
@@ -498,8 +503,7 @@ fn grow<const SAT: bool>(
                         );
                     }
                 } else {
-                    grow::<false>(
-                        center,
+                    grow::<false, VERTEX>(
                         n,
                         seed,
                         xmax,
@@ -560,7 +564,7 @@ pub fn count_cell_centered(n: usize) -> Count {
     if n % 4 == 2 || n % 4 == 3 {
         return 0;
     }
-    enumerate(Center::Cell, n)
+    enumerate::<false>(n)
 }
 
 /// Contribution of polyominoes whose D8 center is a lattice **vertex**
@@ -569,7 +573,7 @@ pub fn count_vertex_centered(n: usize) -> Count {
     if n == 0 || n % 4 != 0 {
         return 0;
     }
-    enumerate(Center::Vertex, n)
+    enumerate::<true>(n)
 }
 
 #[cfg(test)]
