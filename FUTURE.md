@@ -302,6 +302,39 @@ _No deferred work is currently parked._
       in a sharper form. **Do not re-propose** any post-§4.1 deadness prune
       (the dead subtrees are individually ~1 node — there is nothing fat to
       lop). Instrumentation reverted; numbers reproducible from this note.
+    - **(F) Phase-split + drop-the-blocked-set "core reuse" — evaluated,
+      NO-GO (tier-1 measured); refines the §4.7 "any DP" generalization.**
+      Idea: run all pre-§4.1 search first, then post-§4.1, hoping the
+      blocked set's path-dependence (which exists only for global
+      injectivity) could be dropped so identical post-§4.1 subproblems
+      collapse and are counted once (`total = Σ_{distinct cores C} comp(C)`).
+      Decisive datum, ceiling-first: instrument every §4.1-satisfaction
+      crossing (false→true + root `td>0`), fingerprint the boundary state
+      two ways — **KA = slice cells only** (the drop-blocked hypothesis),
+      KB = slice+blocked (contrast) — distinct vs total, n=76..100
+      (`SAT_CORES` env; `--verify OK`, `a(n)` byte-identical). Result:
+      **KA multiplicity ≡ 1.0000** (n≤96 `distinct == crossings` *exactly*;
+      n=100 / KB sub-1.0 deviations are 64-bit fold-hash collisions —
+      structurally KB refines KA so real reuse cannot push KB-distinct
+      *below* KA-distinct, yet it does ⇒ noise). I.e. **every §4.1-boundary
+      slice is already pairwise-distinct**: dropping the blocked set
+      coalesces nothing. This is the Redelmeier exactly-once property
+      (each connected partial slice containing the seed is one recursion
+      node), empirically confirmed to survive the §4.6 x-axis bucketing.
+      So the recursion already shares every common prefix and visits each
+      node once; post-§4.1 subtrees of distinct boundary nodes enumerate
+      *disjoint* slice sets — there is no duplicate work for a phase-split
+      to remove. Any reuse needs a *coarser* key than the (already-unique)
+      slice — but a coarser key merges boundary states with *different*
+      `comp`, which is unsound unless it is exactly the frontier-state DP
+      abstraction whose distinct-state floor §4.7 measured at ≈1.23ⁿ >
+      output ≈1.19ⁿ. **The user's idea, fully unpacked, reduces to E and
+      is closed by the §4.7 floor — now with the added empirical fact that
+      the finest (slice-level) key already has zero reuse.** Caveat logged
+      per "FUTURE.md is not proof": §4.7 only *measured* the anti-diagonal
+      cut; this probe supplies the missing measurement for the slice-level
+      cut (mult ≡ 1) so the "any DP" closure is now empirically anchored at
+      both ends, not asserted. Instrumentation reverted.
 - **Minimal-x-axis-cell bucketing — shipped.** The §4.2 enumerator now
   buckets by the slice's minimal x-axis cell `A=(ax,0)` and grows from the
   pinned root `A` (injectivity from the blocked-set discipline; the global
