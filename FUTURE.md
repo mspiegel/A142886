@@ -260,15 +260,35 @@ _No deferred work is currently parked._
     change (the §4.5/§4.7 floor stands; A — `rayon` over independent
     post-§4.1 subtrees — remains the open parallel lever, deferred per
     "single-core only for now").
-    - **(B) Constant-factor work inside `grow::<true>`.** It is ~46% of
-      runtime, ~100% self-time, zero allocation — the cleanest micro-arch
-      target left after the const-generic fold. Ideas: grow boundary-first
-      to minimize the live `untried` working set (smaller hot bitset ⇒
-      fewer `in_untried`/`blocked` probes, better cache residency);
-      branchless membership; cache-line-packed `CellSet`; hoist the
-      `forbidden`/`xmax`/`in_wedge` invariants out of the `NEIGHBOURS`
-      loop. Byte-identical (pure lowering). Expect low single digits;
-      measure A/B like the §4.6 entries.
+    - **(B) Constant-factor micro-arch in the hot loop — partially
+      SHIPPED.** Original ideas (some now moot post-fusion/S1: the
+      `CellSet` bitset is gone). The one that paid:
+      - **#1 stencil index-delta — SHIPPED (~2–4%, byte-identical).**
+        The 4-neighbour `CellState` index is `ci ± 1` / `ci ± stride`
+        (an add), not a fresh `x*stride + y` multiply per neighbour;
+        `ci = idx(c)` computed once per `pos` and reused for `c`'s own
+        state ops too (`set_slice_at/unset_slice_at/set_blocked_at`).
+        LLVM was *not* strength-reducing the `Cell→idx` multiply across
+        the recursion-tree expansion (the predicted gap → real win,
+        unlike I/td-elim/xmax which the compiler already handled).
+        Measured A/B best-of-5: ratio 0.958/0.964/0.975/0.979/0.981
+        (n=80/88/96/100/104) — modest and **mildly eroding with n** (4%
+        → 2%), but < the 0.99 kill threshold everywhere. Byte-identical
+        to `main` n=0..120; `--verify OK`; tests 10/10; the
+        `ni == idx(nb)` debug-assert proved the delta arithmetic across
+        the full enumeration. 3 now-dead coordinate methods removed.
+      - **#2 bounds-check elision — dropped (not built).** A
+        never-failing bounds check is a perfectly-predicted ≈free branch
+        ⇒ ~0 upside *by construction*; `get_unchecked` adds `unsafe` and
+        can *lose* optimizer facts (codegen worse). Poor risk/reward;
+        not pursued.
+      - **#3 unroll `NEIGHBOURS` + hoist guard sub-tests — dropped.**
+        `[_;4]` is already compiler-unrolled and CSE likely already
+        drops the redundant `in_wedge`/`forbidden` sub-comparisons;
+        manual unroll risks i-cache/codegen regression for ~nil upside.
+      - Boundary-first growth order: untested (changes traversal, larger
+        change; §4.1/§4.6 are order-independent so it *would* stay
+        count-correct, but lower priority — deferred, not rejected).
     - **(C) Analytic short-circuit of exactly-solvable sub-buckets —
       measured; broader than "one bucket", but a diminishing factor.**
       The proven `s=0` boundary closed form `2^(n/8−1)` is the degenerate
@@ -406,8 +426,10 @@ _No deferred work is currently parked._
       kill criterion (byte-identical but ratio ≥ ~0.99 ⇒ NO-GO, don't
       start Stage 2) **triggered → Stage 2 not attempted; I rejected.**
       Reverted; src == `main`. **Do not re-propose**: call/frame overhead
-      is not the bottleneck here and iterative regresses it. This closes
-      the single-core optimisation program at the banked ~31%.
+      is not the bottleneck here and iterative regresses it. (Updated: the
+      single-core program was *not* fully closed — the (B) #1 stencil
+      index-delta later shipped ~2–4%; what's closed is the *call/frame*
+      and *dead-param/branch* micro-classes, not hot-loop ALU.)
     - **Pre-§4.1 `td`-elimination (`grow_unsat`) — measured, NO-GO
       (byte-identical but a ~0% wash).** `td ≡ 0` throughout the
       `SAT==false` monomorph (a gap-0 cell touches the diagonal ⇒ SAT, so
@@ -424,10 +446,14 @@ _No deferred work is currently parked._
       parameter / const-foldable branch; manual specialization buys
       nothing measurable. Pre-committed kill criterion (byte-identical,
       ratio ≥ ~0.99) triggered → reverted, src == `main`. Reinforces the
-      lever-I finding: post-G/blk_unwind/fusion/S1 the per-node work is
-      effectively irreducible — representational/specialization micro-
-      levers no longer move the needle (I −19%, this ~0%). **Do not
-      re-propose pre-§4.1 `td`/branch micro-specialization.**
+      lever-I finding for *this class*: **call/frame and dead-param/branch**
+      micro-levers don't move the needle (I −19%, this ~0%) — the compiler
+      already handles them. (Nuance, post-#1: a *different* micro-class —
+      hot-loop ALU, the (B) #1 stencil index-delta replacing a per-neighbour
+      multiply the compiler did *not* strength-reduce — did pay ~2–4%. So
+      "per-node work irreducible" holds for params/branches/call-shape, not
+      for hot-loop arithmetic.) **Do not re-propose pre-§4.1 `td`/branch
+      micro-specialization.**
     - **(H) Local-window endgame table — measured, NO-GO (premise
       *confirmed* but no bounded table + memo is the §4.7 trap).** G
       short-circuits the last level (R=4); H asked whether the bottom

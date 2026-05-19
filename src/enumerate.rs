@@ -78,6 +78,42 @@ impl CellState {
         debug_assert_eq!(self.s[i], from);
         self.s[i] = to;
     }
+    // ── Index (`*_at`) family ─────────────────────────────────────────
+    // The `_at` suffix means "operate on a precomputed flat index
+    // `i = x*stride + y`" rather than a `Cell` (which would recompute that
+    // multiply). The hot recursion (`grow`) derives the 4 neighbour
+    // indices as `ci ± 1` / `ci ± stride` (an add — lever #1) and reuses
+    // `ci = idx(c)` for `c`'s own state ops; `*_at(idx(x))` is identical
+    // in effect to the coordinate form `*(x)`.
+    #[inline]
+    fn is_free_at(&self, i: usize) -> bool {
+        self.s[i] == Self::FREE
+    }
+    #[inline]
+    fn step_at(&mut self, i: usize, from: u8, to: u8) {
+        debug_assert_eq!(self.s[i], from);
+        self.s[i] = to;
+    }
+    #[inline]
+    fn set_queued_at(&mut self, i: usize) {
+        self.step_at(i, Self::FREE, Self::QUEUED);
+    }
+    #[inline]
+    fn set_slice_at(&mut self, i: usize) {
+        self.step_at(i, Self::QUEUED, Self::SLICE);
+    }
+    #[inline]
+    fn unset_slice_at(&mut self, i: usize) {
+        self.step_at(i, Self::SLICE, Self::QUEUED);
+    }
+    #[inline]
+    fn set_blocked_at(&mut self, i: usize) {
+        self.step_at(i, Self::QUEUED, Self::BLOCKED);
+    }
+    // ── Coordinate family ─────────────────────────────────────────────
+    // Cold sites only (bucket-seed frontier build, truncation dequeue,
+    // frame-exit unblock): no precomputed index to reuse, so they take a
+    // `Cell` and compute the index themselves.
     #[inline]
     fn place_seed(&mut self, c: Cell) {
         self.step(c, Self::FREE, Self::SLICE);
@@ -85,18 +121,6 @@ impl CellState {
     #[inline]
     fn set_queued(&mut self, c: Cell) {
         self.step(c, Self::FREE, Self::QUEUED);
-    }
-    #[inline]
-    fn set_slice(&mut self, c: Cell) {
-        self.step(c, Self::QUEUED, Self::SLICE);
-    }
-    #[inline]
-    fn unset_slice(&mut self, c: Cell) {
-        self.step(c, Self::SLICE, Self::QUEUED);
-    }
-    #[inline]
-    fn set_blocked(&mut self, c: Cell) {
-        self.step(c, Self::QUEUED, Self::BLOCKED);
     }
     #[inline]
     fn unblock(&mut self, c: Cell) {
@@ -365,9 +389,14 @@ fn grow<const SAT: bool>(
     if !SAT && weight + edge_reach_lb(td, min_gap) > n {
         return;
     }
+    // Lever #1: the 4-neighbour `CellState` index is `ci ± 1` / `ci ± stride`
+    // (an add), not a fresh `x*stride + y` multiply. `stride` is fixed for
+    // the whole `grow` call; `ci = idx(c)` is computed once per `pos`.
+    let stride_i = st.stride as isize;
     let hi = untried.len(); // this level's frontier is untried[lo..hi]
     for pos in lo..hi {
         let c = untried[pos];
+        let ci = st.idx(c);
         let w2 = weight + orbit_size(center, c) as u64;
         if w2 <= n {
             // tx ≡ 1 globally (seed on x-axis), so §4.1 reduces to `td`.
@@ -378,7 +407,7 @@ fn grow<const SAT: bool>(
             } else {
                 td + u32::from(on_diagonal_edge(c))
             };
-            st.set_slice(c);
+            st.set_slice_at(ci);
             if w2 == n {
                 // §4.1: connected by construction; x-axis is met at the seed,
                 // so only the diagonal touch (`td`) gates (unconditional SAT).
@@ -390,18 +419,20 @@ fn grow<const SAT: bool>(
                 // Every prior branch truncated back to `hi`, so the buffer
                 // ends exactly at this level's suffix here.
                 debug_assert_eq!(untried.len(), hi);
-                // Append c's fresh neighbours after the suffix. `st.is_free`
-                // is the fused `!p && !blocked && !in_untried` (one read);
-                // marking QUEUED replaces `in_untried.insert`.
+                // Append c's fresh neighbours after the suffix. The membership
+                // index is `ci + (dx*stride + dy)` (add, not multiply); only
+                // formed after the wedge/xmax/forbidden guards pass (so it is
+                // provably in-bounds and == `idx(nb)`, asserted in debug).
                 for (dx, dy) in NEIGHBOURS {
                     let nb = (c.0 + dx, c.1 + dy);
-                    if in_wedge(nb)
-                        && nb.0 <= xmax
-                        && !forbidden(nb, seed.0)
-                        && st.is_free(nb)
-                    {
-                        st.set_queued(nb);
-                        untried.push(nb);
+                    if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) {
+                        let ni =
+                            ci.wrapping_add_signed(dx as isize * stride_i + dy as isize);
+                        debug_assert_eq!(ni, st.idx(nb));
+                        if st.is_free_at(ni) {
+                            st.set_queued_at(ni);
+                            untried.push(nb);
+                        }
                     }
                 }
                 if SAT || ntd > 0 {
@@ -467,12 +498,12 @@ fn grow<const SAT: bool>(
                     st.dequeue(nb);
                 }
             }
-            st.unset_slice(c); // SLICE → QUEUED (c is still in the buffer)
+            st.unset_slice_at(ci); // SLICE → QUEUED (c is still in the buffer)
         }
         // c is now excluded for this frame's later siblings. It was QUEUED
         // (a frontier cell still in the buffer, or just un-chosen above);
         // QUEUED → BLOCKED.
-        st.set_blocked(c);
+        st.set_blocked_at(ci);
     }
     // Unwind this frame's blocks = exactly `untried[lo..hi]` (untouched:
     // the loop only appends past `hi` and truncates back). These cells stay
