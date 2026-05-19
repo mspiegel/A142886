@@ -387,22 +387,46 @@ fn grow<const SAT: bool>(
                     // §4.1 satisfied (or already) — monotone, so the whole
                     // child subtree takes the SAT specialization. (On the SAT
                     // path this is the only arm; the else is folded out.)
-                    grow::<true>(
-                        center,
-                        n,
-                        seed,
-                        xmax,
-                        p,
-                        w2,
-                        0,
-                        0,
-                        pos + 1,
-                        untried,
-                        in_untried,
-                        blocked,
-                        blk_unwind,
-                        total,
-                    );
+                    if n - w2 == 4 {
+                        // R=4 tail-fold (DESIGN/FUTURE lever G). The SAT
+                        // child has remaining budget 4. Every cell is
+                        // weight ∈ {4,8} (the only weight-1 cell, the apex,
+                        // is the seed or forbidden, so never a fresh
+                        // frontier cell). A weight-4 cell completes
+                        // (`w2'==n`) and is accepted unconditionally (SAT);
+                        // a weight-8 cell overshoots (`w2'=n+4>n`) and is
+                        // skipped. Either way the child never recurses and
+                        // never appends to `untried`, and its `blocked`
+                        // inserts are fully self-unwound and never read
+                        // (no neighbour expansion). So the child's entire
+                        // contribution is exactly the number of weight-4
+                        // cells in its frontier `untried[pos+1..]` — fold
+                        // it inline, skipping the call + per-node frame and
+                        // the blocked/unwind bookkeeping. Provably
+                        // count-identical to the recursion.
+                        for k in (pos + 1)..untried.len() {
+                            if orbit_size(center, untried[k]) as u64 == 4 {
+                                *total += 1;
+                            }
+                        }
+                    } else {
+                        grow::<true>(
+                            center,
+                            n,
+                            seed,
+                            xmax,
+                            p,
+                            w2,
+                            0,
+                            0,
+                            pos + 1,
+                            untried,
+                            in_untried,
+                            blocked,
+                            blk_unwind,
+                            total,
+                        );
+                    }
                 } else {
                     grow::<false>(
                         center,

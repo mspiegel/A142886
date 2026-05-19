@@ -353,32 +353,38 @@ _No deferred work is currently parked._
       cut; this probe supplies the missing measurement for the slice-level
       cut (mult ≡ 1) so the "any DP" closure is now empirically anchored at
       both ends, not asserted. Instrumentation reverted.
-    - **(G) Tail-fold the R=4 level (Redelmeier "last-cell") — GO
-      candidate, B-family, measured.** Post-§4.1 node-visits by remaining
-      budget `R = n − weight` (`SAT_RHIST`, n=80/88/96, `--verify OK`,
-      a(n) byte-identical), stable in n: **R=4 = 50.4% of all SAT
-      node-visits with 0.00% child-spawns** — pure non-recursive
-      leaf-loops (a `grow()` call + `hi`/`blk_base`/`blk_unwind`
-      bookkeeping wrapping a loop that just counts weight-4 frontier
-      cells). Fold them into the parent: when a node would recurse into a
-      child with entry `R=4`, instead add `#{weight-4 cells in that
-      child's frontier}` directly. **Provably count-preserving** — an R=4
-      node has no recursive children, so its internal `blocked` inserts
-      affect nothing else; its value is exactly that frontier count. Wipes
-      the call/setup overhead for ~half of all post-§4.1 nodes. Extending
-      to R=8 covers cumulatively 74.4% of nodes (frontier-iters 75.0%) but
-      only 18.3% of child-spawns, and adds the rare connected-weight-4-pair
-      case with its own blocked-discipline correctness burden — smaller
-      marginal gain, more risk; do R=4 first. **Ceiling/limits:** this is
-      recursion-overhead amortization, *not* algorithmic — the expensive
-      neighbour-expansion (`child_spawns`) is 82% at `R≥12` and untouched,
-      and the R≤8 frontier-iteration work (75%) is *relocated* into the
-      parent, not removed. So expect a B-class constant factor (same lever
-      family as the shipped ~4% const-generic split), exact, count-
-      preserving, stacking with B; not a growth-class change. Unlike
-      D/E/F this is a **GO** (standard Redelmeier optimization; the R=4
-      fold is the safe, high-value form). Instrumentation reverted;
-      numbers reproducible (`SAT_RHIST`).
+    - **(G) Tail-fold the R=4 level (Redelmeier "last-cell") — SHIPPED
+      (~8%, count-preserving).** Profile (`SAT_RHIST`, n=80/88/96, stable
+      in n): **R=4 = 50.4% of all post-§4.1 node-visits with 0.00%
+      child-spawns** — pure non-recursive leaf-loops (a `grow()` call +
+      `hi`/`blk_base`/`blk_unwind` frame wrapping a loop that just counts
+      weight-4 frontier cells). **Implemented:** at the SAT recursive call
+      site, when the child's remaining budget `n − w2 == 4`, skip the
+      `grow::<true>` call and instead `*total += #{k in pos+1..untried.len()
+      : orbit_size(center, untried[k]) == 4}`. **Provably count-identical**
+      — every fresh frontier cell is weight ∈ {4,8} (the only weight-1
+      cell, the apex, is the seed or `forbidden`, never a fresh frontier
+      cell); a weight-4 cell completes (`w2'==n`, accepted unconditionally
+      under SAT), a weight-8 overshoots and is skipped, so the child never
+      recurses, never appends to `untried`, and its `blocked` inserts are
+      fully self-unwound and never read ⇒ its whole contribution is exactly
+      that frontier weight-4 count. **Measured (release, controlled A/B,
+      best-of-3/5):** `a(n)` **byte-identical to pre-G `main` for
+      n=0..120**; `--verify OK` (n≤68 vs b-file/`REFERENCE`); tests
+      **10/10**. **~8% faster, non-eroding:** ratio (G / pre-G) 0.912
+      (n=80), 0.926 (88), 0.921 (96), 0.920 (100), 0.919 (104) — no
+      small-n regression, ≈2× the const-generic split's ~4% as expected
+      (it removes call/frame overhead for ~half of all post-§4.1 nodes).
+      **Scope/limits:** folded only the SAT (`grow::<true>`) R=4 child —
+      the post-§4.1 scope that was measured; the pre-§4.1 (`grow::<false>`)
+      R=4 child and the negligible root-bucket R=4 case are intentionally
+      untouched. Recursion-overhead amortization, *not* algorithmic: the
+      expensive neighbour-expansion (82% at `R≥12`) is untouched and the
+      R≤8 frontier work is relocated, not removed — a B-class constant
+      factor that stacks with B/I, not a growth-class change. The R=8
+      extension (cum. 74.4% of nodes, but only 18.3% of child-spawns +
+      the rare connected-weight-4-pair correctness burden) remains a
+      smaller, riskier follow-on, not done.
     - **(I) Recursion → explicit-stack iterative DFS — candidate,
       B-family, not yet built.** The sampling profile is ~46% of total
       time, ~100% self-time, in a deeply recursive `grow`. Replacing the
