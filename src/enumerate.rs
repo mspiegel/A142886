@@ -236,24 +236,47 @@ fn enumerate(center: Center, n: usize) -> Count {
                 untried.push(nb);
             }
         }
-        grow(
-            center,
-            n,
-            seed,
-            xmax,
-            &mut p,
-            ws,
-            tx,
-            td,
-            seed.1,
-            seed.0 - seed.1,
-            0,
-            &mut untried,
-            &mut in_untried,
-            &mut blocked,
-            &mut blk_unwind,
-            &mut total,
-        );
+        if tx > 0 && td > 0 {
+            // Seed already satisfies §4.1 (ax==0: apex / 2×2 core) — straight
+            // into the SAT specialization (tx/td/min_y/min_gap unused ⇒ 0).
+            grow::<true>(
+                center,
+                n,
+                seed,
+                xmax,
+                &mut p,
+                ws,
+                0,
+                0,
+                0,
+                0,
+                0,
+                &mut untried,
+                &mut in_untried,
+                &mut blocked,
+                &mut blk_unwind,
+                &mut total,
+            );
+        } else {
+            grow::<false>(
+                center,
+                n,
+                seed,
+                xmax,
+                &mut p,
+                ws,
+                tx,
+                td,
+                seed.1,
+                seed.0 - seed.1,
+                0,
+                &mut untried,
+                &mut in_untried,
+                &mut blocked,
+                &mut blk_unwind,
+                &mut total,
+            );
+        }
     }
     total
 }
@@ -280,8 +303,22 @@ fn enumerate(center: Center, n: usize) -> Count {
 /// `untried[pos]` is added to `blocked` after its branch — excluding it for
 /// later siblings and their subtrees — and recorded on the shared `blk_unwind`
 /// stack so this level can restore precisely its own additions on exit.
+///
+/// **`const SAT`** specializes on whether §4.1 (touch both wedge edges) is
+/// already satisfied. §4.1 is monotone (DESIGN §4.6(b): `tx`,`td` only grow),
+/// so once satisfied `edge_reach_lb(tx>0,td>0,..) == 0` (the prune can never
+/// fire) and the acceptance gate is always true. `SAT == false` is the general
+/// path; `SAT == true` is the post-satisfaction fast path. The compiler
+/// monomorphizes two copies and folds every `!SAT` / `SAT ||` at compile time,
+/// so the `SAT == true` machine code is a hand-stripped fast path (no
+/// `edge_reach_lb`, no per-cell edge tests, no `tx/td/min_y/min_gap` upkeep,
+/// unconditional accept) — one source, zero runtime dispatch. The
+/// frontier/`blocked`/`in_untried` discipline is identical for both, so the
+/// generated slice set — and every count — is unchanged. `tx/td/min_y/min_gap`
+/// are unused (and DCE'd) when `SAT`; pass 0. `seed` is always needed for
+/// `forbidden` (bucketing is independent of §4.1).
 #[allow(clippy::too_many_arguments)]
-fn grow(
+fn grow<const SAT: bool>(
     center: Center,
     n: u64,
     seed: Cell,
@@ -302,7 +339,9 @@ fn grow(
     // Edge-reachability prune (§4.1 condition 2): no descendant of this node
     // can ever touch both wedge edges within the remaining budget. Sound
     // because `weight + edge_reach_lb(..)` only grows down the recursion.
-    if weight + edge_reach_lb(tx, td, min_y, min_gap) > n {
+    // Skipped entirely in the SAT specialization (it would return 0 — the
+    // predicate is already satisfied — so the whole check is folded out).
+    if !SAT && weight + edge_reach_lb(tx, td, min_y, min_gap) > n {
         return;
     }
     let hi = untried.len(); // this level's frontier is untried[lo..hi]
@@ -311,12 +350,21 @@ fn grow(
         let c = untried[pos];
         let w2 = weight + orbit_size(center, c) as u64;
         if w2 <= n {
-            let ntx = tx + u32::from(on_x_axis_edge(c));
-            let ntd = td + u32::from(on_diagonal_edge(c));
+            // SAT: unused (folded away); (1,1) keeps the shared accept/
+            // dispatch expressions trivially true with no edge-class tests.
+            let (ntx, ntd) = if SAT {
+                (1, 1)
+            } else {
+                (
+                    tx + u32::from(on_x_axis_edge(c)),
+                    td + u32::from(on_diagonal_edge(c)),
+                )
+            };
             p.insert(c);
             if w2 == n {
-                // §4.1: connected by construction; needs both wedge edges.
-                if ntx > 0 && ntd > 0 {
+                // §4.1: connected by construction; needs both wedge edges
+                // (always true on the SAT path ⇒ unconditional there).
+                if SAT || (ntx > 0 && ntd > 0) {
                     *total += 1;
                 }
                 // cannot extend further (weight would exceed n)
@@ -338,24 +386,48 @@ fn grow(
                         untried.push(nb);
                     }
                 }
-                grow(
-                    center,
-                    n,
-                    seed,
-                    xmax,
-                    p,
-                    w2,
-                    ntx,
-                    ntd,
-                    min_y.min(c.1),
-                    min_gap.min(c.0 - c.1),
-                    pos + 1,
-                    untried,
-                    in_untried,
-                    blocked,
-                    blk_unwind,
-                    total,
-                );
+                if SAT || (ntx > 0 && ntd > 0) {
+                    // §4.1 satisfied (or already) — monotone, so the whole
+                    // child subtree takes the SAT specialization. (On the SAT
+                    // path this is the only arm; the else is folded out.)
+                    grow::<true>(
+                        center,
+                        n,
+                        seed,
+                        xmax,
+                        p,
+                        w2,
+                        0,
+                        0,
+                        0,
+                        0,
+                        pos + 1,
+                        untried,
+                        in_untried,
+                        blocked,
+                        blk_unwind,
+                        total,
+                    );
+                } else {
+                    grow::<false>(
+                        center,
+                        n,
+                        seed,
+                        xmax,
+                        p,
+                        w2,
+                        ntx,
+                        ntd,
+                        min_y.min(c.1),
+                        min_gap.min(c.0 - c.1),
+                        pos + 1,
+                        untried,
+                        in_untried,
+                        blocked,
+                        blk_unwind,
+                        total,
+                    );
+                }
                 // Drop this branch's appended neighbours, keeping
                 // `in_untried` in lock-step, so siblings see only the suffix.
                 while untried.len() > hi {
