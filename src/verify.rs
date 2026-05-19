@@ -81,12 +81,11 @@ mod tests {
     }
 
     /// Test (g) — DESIGN.md §7(g): regression against the authoritative OEIS
-    /// b-file. `#[ignore]`d and bounded at [`DEEP_BOUND`] (the literal
-    /// `0..=163` is infeasible at the baseline — DESIGN.md §4.5 / §7).
-    /// Run from the crate root with the b-file present:
-    /// `cargo test --release -- --ignored matches_bfile`.
+    /// b-file. Formerly `#[ignore]`d; now always-on (runs in <0.01s on the
+    /// optimized enumerator). Still bounded at [`DEEP_BOUND`] (the literal
+    /// `0..=163` is infeasible — DESIGN.md §4.5 / §7); skips gracefully if
+    /// `b142886.txt` is absent from the crate root.
     #[test]
-    #[ignore]
     fn matches_bfile() {
         use crate::count;
         let path = Path::new("b142886.txt");

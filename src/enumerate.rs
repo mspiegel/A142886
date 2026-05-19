@@ -558,10 +558,9 @@ mod tests {
     }
 
     /// Test (a), deep tier — DESIGN.md §7(a): full embedded prefix
-    /// (n = 0..=68). `#[ignore]`d per the §7 baseline-runtime note; run with
-    /// `cargo test --release -- --ignored`.
+    /// (n = 0..=68). Formerly `#[ignore]`d per the §7 baseline-runtime note;
+    /// now always-on — runs in <0.01s on the optimized enumerator.
     #[test]
-    #[ignore]
     fn matches_oeis_prefix_full() {
         for (n, &expected) in REFERENCE.iter().enumerate() {
             assert_eq!(count(n), expected, "a({n}) mismatch");
