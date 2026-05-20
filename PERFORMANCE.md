@@ -636,9 +636,45 @@ _No deferred work is currently parked._
         `[_;4]` is already compiler-unrolled and CSE likely already
         drops the redundant `in_wedge`/`forbidden` sub-comparisons;
         manual unroll risks i-cache/codegen regression for ~nil upside.
-      - Boundary-first growth order: untested (changes traversal, larger
-        change; §4.1/§4.6 are order-independent so it *would* stay
-        count-correct, but lower priority — deferred, not rejected).
+      - **Boundary-first growth order — SHIPPED (~4-6 % serial,
+        byte-identical).** The `NEIGHBOURS` constant was reordered
+        from `[(1, 0), (-1, 0), (0, 1), (0, -1)]` to
+        **`[(-1, 0), (0, 1), (1, 0), (0, -1)]`** — i.e. gap-reducing
+        directions (left = `(−1, 0)`, up = `(0, 1)`, both move toward
+        the diagonal `x = y`) push onto `untried` *before* gap-holding
+        / -increasing directions. Since the recursion explores
+        `untried[pos]` in insertion order, the early subtrees of each
+        branch step toward the diagonal first. Hypothesis: subtrees
+        satisfy §4.1 earlier → more of the recursion enters the faster
+        `SAT=true` specialization (no `edge_reach_lb` computation, no
+        per-cell `on_diagonal_edge` test, unconditional accept gate).
+        Counts unchanged (§4.1/§4.6 are order-independent — the §4.6
+        prune is per-node admissibility, not monotone, so order
+        affects firing depth but not the set of pruned subtrees).
+        **Measured (release, n=104, 12-core Apple Silicon):**
+
+        | metric                                | shipped  | + boundary-first | change |
+        |---------------------------------------|---------:|-----------------:|-------:|
+        | single-call `count_cell_centered` (mean of 3) | 0.427 s | **0.410 s** | **−4 %** |
+        | single-call `count` (cell+vertex, mean) | 0.484 s | **0.467 s** | **−4 %** |
+        | --max-n 104 serial best-of-7          | 1.04 s   | **0.98 s**       | **−6 %** |
+        | single-call `count_parallel` (mean)   | 0.061 s  | 0.061 s          | ~0 % |
+        | --max-n 104 --parallel best-of-15     | 0.18 s   | 0.17–0.18 s      | within noise |
+
+        **Why it helps serial but not parallel.** The parallel path
+        is Amdahl-bound by the longest single sub-task running alone on
+        one worker — order changes inside that sub-task don't move
+        the wall (cell-only Amdahl floor is set by the longest bucket's
+        heaviest sub-task; both directions get traversed eventually
+        within it). On the serial path there's no other-worker idle
+        to absorb the early-SAT savings, so the savings show up
+        directly as wall-time reduction. Net effect on the serial
+        path is real and uniform across n=80..104.
+        **Correctness:** byte-identical to OEIS reference + b-file
+        n ≤ 68 + `--max-n 120` diff vs pre-change output.
+        **Stack:** small, clean, single-line change to the `NEIGHBOURS`
+        constant — no other code touched. Closes the last item in the
+        "deferred but not rejected" list under lever B.
     - **(C) Analytic short-circuit of exactly-solvable sub-buckets —
       measured; broader than "one bucket", but a diminishing factor.**
       The proven `s=0` boundary closed form `2^(n/8−1)` is the degenerate

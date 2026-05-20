@@ -228,7 +228,19 @@ fn forbidden(c: Cell, ax: i32) -> bool {
     c.1 == 0 && c.0 < ax
 }
 
-const NEIGHBOURS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+/// 4-neighbour offsets, ordered **diagonal-first**: directions that
+/// reduce the wedge gap `x − y` (left = `(-1, 0)`, up = `(0, 1)`) are
+/// pushed onto `untried` *before* directions that increase or hold the
+/// gap (right = `(1, 0)`, down = `(0, -1)`). Since the recursion explores
+/// `untried[pos]` in insertion order, this gives a "boundary-first"
+/// growth order — subtrees that step toward the diagonal get explored
+/// before subtrees that step away. Once a path touches the diagonal,
+/// §4.1 is satisfied and the recursion enters the faster `SAT=true`
+/// specialization (no `edge_reach_lb`, no per-cell `on_diagonal_edge`
+/// test). Counts are unchanged (§4.1/§4.6 are order-independent — see
+/// the §4.6 admissibility argument); only the depth at which subtrees
+/// first satisfy §4.1 shifts.
+const NEIGHBOURS: [(i32, i32); 4] = [(-1, 0), (0, 1), (1, 0), (0, -1)];
 
 /// Hot-loop specialization of `symmetry::orbit_size` that assumes the input is
 /// a wedge frontier cell from `untried` (so `0 ≤ y ≤ x`) **and** is not the
