@@ -619,24 +619,23 @@ pub fn count(n: usize) -> Count {
     count_cell_centered(n) + count_vertex_centered(n)
 }
 
-/// Parallel sibling of [`count`]: bucket-level rayon over each center's
-/// independent x-axis buckets, with cell run before vertex sequentially at
-/// the top level.
+/// Parallel sibling of [`count`]: a single `par_iter` over the **union**
+/// of live cell *and* vertex x-axis buckets, each tagged with its center.
+/// One worker pool, one fan-out — work-stealing crosses centers naturally
+/// (a worker that finishes a cell bucket can immediately pick up a vertex
+/// bucket if it's queued), so the cell-tail / vertex-tail idle phase that
+/// a sequential cell-then-vertex pair would pay is folded away.
 ///
-/// **Why sequential c+v, not `rayon::join`:** the original plan was to
-/// `rayon::join(cell_par, vertex_par)` so workers cross-steal between
-/// centers and eliminate the cell-tail / vertex-tail idle phase. Measured
-/// (release, --max-n 104, best-of-5, 12-core Apple Silicon): join = 0.75 s
-/// vs sequential = 0.22 s — join is **3.4× slower**, costing ~0.5 s of
-/// per-call overhead across the binary's outer max-n loop. The tier-3
-/// reasoning was that join saves the cell-tail idle (≤16 % at n=88);
-/// the measurement says rayon::join's main-thread overhead is much larger
-/// than that, because each inner [`count_cell_centered_parallel`] /
-/// [`count_vertex_centered_parallel`] *already* fully fans out to the
-/// global pool via `par_iter`, and wrapping that in an outer join from a
-/// non-worker thread adds synchronization without parallelizing anything
-/// new. Sequential c+v at the top level keeps the inner par_iter parallel
-/// gains (~4.8× at n=104) and avoids the join cost.
+/// **Path here (recorded so this isn't re-explored):**
+/// 1. `rayon::join(cell_par, vertex_par)`: measured 3.4× SLOWER than
+///    sequential c+v (0.75 s vs 0.22 s at --max-n 104) — main-thread join
+///    overhead × 105 outer-loop calls dominates. NO-GO.
+/// 2. Sequential `c + v` (each internally par_iter): shipped first. ~6.2×
+///    single-call at n=104; leaves ~12 ms vertex-after-cell tail.
+/// 3. **This: single union par_iter.** Closes the vertex tail without any
+///    `rayon::join` overhead — `par_iter` from a non-worker is cheap, and
+///    there is only one of it. Should approach the cell-only Amdahl
+///    floor (≈ longest single cell bucket, ~61 ms at n=104).
 ///
 /// Byte-identical to [`count`] by construction (each bucket is fully
 /// self-contained; the sum is commutative).
@@ -647,9 +646,41 @@ pub fn count_parallel(n: usize) -> Count {
     if n % 4 == 2 || n % 4 == 3 {
         return 0;
     }
-    let c = count_cell_centered_parallel(n);
-    let v = count_vertex_centered_parallel(n);
-    c + v
+    let n_u64 = n as u64;
+    let xmax = n_u64 as i32;
+
+    // Build the union of live buckets across both centers. Each task is
+    // `(is_vertex, ax)`. Residue rules (mirrors `enumerate<VERTEX>`):
+    //   - n % 4 == 1: cell apex only; vertex contributes 0 (no buckets).
+    //   - n % 4 == 0: cell apex_forbidden (skip ax=0); vertex all buckets.
+    //   - n % 4 ∈ {2,3}: handled by the early return above.
+    let mut tasks: Vec<(bool, i32)> = Vec::new();
+    if n % 4 == 1 {
+        tasks.push((false, 0)); // cell apex only
+    } else {
+        // n % 4 == 0
+        for ax in 1..=xmax {
+            tasks.push((false, ax)); // cell, skip apex
+        }
+        for ax in 0..=xmax {
+            tasks.push((true, ax)); // vertex, all
+        }
+    }
+
+    tasks
+        .into_par_iter()
+        .with_max_len(1) // one bucket per task — workloads are heterogeneous
+        // (heavy cell-plateau ax=1..6 ≈ 50–60 ms; vertex buckets <1 ms),
+        // so adaptive chunking groups heavy cells together and badly
+        // imbalances the pool. Force per-bucket granularity.
+        .map(|(is_vertex, ax)| {
+            if is_vertex {
+                run_bucket::<true>(n_u64, ax, xmax)
+            } else {
+                run_bucket::<false>(n_u64, ax, xmax)
+            }
+        })
+        .sum()
 }
 
 /// Contribution of polyominoes whose D8 center is a lattice **cell** center
@@ -772,6 +803,200 @@ mod tests {
         for (n, &expected) in REFERENCE.iter().enumerate() {
             assert_eq!(count(n), expected, "a({n}) mismatch");
         }
+    }
+
+    /// Diagnostic: time each *live* cell-centered bucket at n=104 in
+    /// isolation, best-of-5. Answers the Amdahl-vs-overhead question for
+    /// the rayon-over-buckets lever: the longest single bucket's wall-time
+    /// is the floor the parallel run can never beat (any task it splits
+    /// into is bounded below by the serial single-bucket time, since the
+    /// bucket runs on one worker thread).
+    ///
+    /// Run with: `cargo test --release time_cell_buckets_n104 -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn time_cell_buckets_n104() {
+        use std::time::Instant;
+        let n_usize: usize = 104;
+        let n: u64 = n_usize as u64;
+        let xmax = n as i32;
+        // Residue rules for cell-centered at n%4==0: skip the apex bucket
+        // (ax==0); every other ax is live (cf. `enumerate<false>` body).
+        let apex_forbidden = n % 4 == 0;
+        let apex_required = n % 4 == 1;
+
+        let mut rows: Vec<(i32, Count, u128)> = Vec::new();
+        for ax in 0..=xmax {
+            let is_apex = ax == 0;
+            if apex_required && !is_apex {
+                continue;
+            }
+            if apex_forbidden && is_apex {
+                continue;
+            }
+            let mut best_us = u128::MAX;
+            let mut last_count: Count = 0;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let c = run_bucket::<false>(n, ax, xmax);
+                let us = t.elapsed().as_micros();
+                if us < best_us {
+                    best_us = us;
+                }
+                last_count = c;
+            }
+            if best_us > 0 || last_count > 0 {
+                rows.push((ax, last_count, best_us));
+            }
+        }
+
+        let total: u128 = rows.iter().map(|(_, _, us)| us).sum();
+        // Sort by descending wall-time so the longest bucket is at top.
+        let mut sorted = rows.clone();
+        sorted.sort_by_key(|(_, _, us)| std::cmp::Reverse(*us));
+
+        println!(
+            "\nn={n_usize} cell-centered per-bucket isolation (best-of-5):"
+        );
+        println!("  Sum-of-buckets serial: {:.3} s", total as f64 / 1e6);
+        println!("  Heaviest bucket:");
+        for (rank, (ax, count, us)) in sorted.iter().take(5).enumerate() {
+            let pct = 100.0 * *us as f64 / total as f64;
+            println!(
+                "    #{} ax={ax:3} slices={count:>8} time={:.3} s ({pct:5.1}%)",
+                rank + 1,
+                *us as f64 / 1e6
+            );
+        }
+        // Print in ax order too, for context.
+        println!("  All live cell buckets (ax order):");
+        for (ax, count, us) in &rows {
+            let pct = 100.0 * *us as f64 / total as f64;
+            println!(
+                "    ax={ax:3} slices={count:>8} time={:.6} s ({pct:5.1}%)",
+                *us as f64 / 1e6
+            );
+        }
+    }
+
+    /// Diagnostic: per-n single-call wall-time for `count` (serial) vs
+    /// `count_parallel`, to find the crossover where parallel starts
+    /// paying off vs paying overhead. Best-of-5, adaptive iteration
+    /// count so each measurement aggregates ≥ 10 ms of wall-time (so
+    /// sub-µs functions are still resolvable).
+    ///
+    /// Run with: `cargo test --release crossover_serial_vs_parallel -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn crossover_serial_vs_parallel() {
+        use std::time::Instant;
+
+        // Time function `f` at value `n`: pick K so K calls take ≥ 10 ms
+        // wall-time, then best-of-5 (K-call mean per measurement).
+        fn time_per_call(f: fn(usize) -> Count, n: usize) -> f64 {
+            // Calibrate K: start at 1, double until one batch hits ≥ 10 ms.
+            let mut k = 1usize;
+            loop {
+                let t = Instant::now();
+                for _ in 0..k {
+                    std::hint::black_box(f(n));
+                }
+                let elapsed = t.elapsed().as_secs_f64();
+                if elapsed >= 0.010 || k >= 1_000_000 {
+                    // Best-of-5 at this K.
+                    let mut best = f64::INFINITY;
+                    for _ in 0..5 {
+                        let t = Instant::now();
+                        for _ in 0..k {
+                            std::hint::black_box(f(n));
+                        }
+                        let e = t.elapsed().as_secs_f64();
+                        if e < best {
+                            best = e;
+                        }
+                    }
+                    return best / k as f64;
+                }
+                k *= 2;
+            }
+        }
+
+        let ns: Vec<usize> = vec![
+            4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64, 72, 80, 88, 96, 100, 104,
+        ];
+
+        println!(
+            "\n n   serial(s)    parallel(s)   ratio(par/ser)   speedup   parallel pays?"
+        );
+        for &n in &ns {
+            let s = time_per_call(count, n);
+            let p = time_per_call(count_parallel, n);
+            let ratio = p / s;
+            let speedup = s / p;
+            let verdict = if ratio < 0.99 {
+                "yes"
+            } else if ratio < 1.01 {
+                "wash"
+            } else {
+                "NO — slower"
+            };
+            println!(
+                "{n:4}  {s:9.6}    {p:9.6}      {ratio:6.3}        {speedup:6.2}x   {verdict}"
+            );
+        }
+    }
+
+    /// Diagnostic: time single-shot `count_cell_centered{,_parallel}(104)`
+    /// and `count{,_parallel}(104)` — *without* the binary's outer
+    /// `for n in 0..=N` loop — so the parallel wall-clock compares
+    /// directly to the longest-single-bucket Amdahl floor measured by
+    /// `time_cell_buckets_n104`.
+    ///
+    /// Run with: `cargo test --release time_single_call_n104 -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn time_single_call_n104() {
+        use std::time::Instant;
+        let n: usize = 104;
+
+        // Best-of-5 per case.
+        let bench = |name: &str, f: fn(usize) -> Count| {
+            let mut best_us = u128::MAX;
+            let mut last = 0;
+            for _ in 0..5 {
+                let t = Instant::now();
+                last = f(n);
+                let us = t.elapsed().as_micros();
+                if us < best_us {
+                    best_us = us;
+                }
+            }
+            println!(
+                "  {name:36}  {:.3} s   (count={})",
+                best_us as f64 / 1e6,
+                last
+            );
+            best_us
+        };
+
+        println!("\nn={n} single-call wall-time (best-of-5):");
+        let ser_cell = bench("count_cell_centered (serial)", count_cell_centered);
+        let par_cell = bench("count_cell_centered_parallel", count_cell_centered_parallel);
+        let ser_both = bench("count (serial, cell+vertex)", count);
+        let par_both = bench("count_parallel (cell+vertex)", count_parallel);
+
+        println!(
+            "\n  cell speedup: {:.2}x  (serial / parallel = {:.3}/{:.3})",
+            ser_cell as f64 / par_cell as f64,
+            ser_cell as f64 / 1e6,
+            par_cell as f64 / 1e6
+        );
+        println!(
+            "  both speedup: {:.2}x  (serial / parallel = {:.3}/{:.3})",
+            ser_both as f64 / par_both as f64,
+            ser_both as f64 / 1e6,
+            par_both as f64 / 1e6
+        );
     }
 
     /// Parallel-path byte-identical oracle: every `count_parallel(n)` must

@@ -242,6 +242,48 @@ _No deferred work is currently parked._
     dominated by the largest n; parallelizing the outer loop would
     oversubscribe without gain). Parallel path is opt-in via
     `--parallel`; serial path unchanged and is the default.
+  - **REFINEMENT — union par_iter + `with_max_len(1)`: SHIPPED (~+13 %
+    on top, tier-1 measured, byte-identical).** A diagnostic A/B over
+    several scheduling choices for `count_parallel` (= cell + vertex):
+    - *(I) Sequential c+v* (each calls its own par_iter, run cell then
+      vertex): single-call n=104 = 76 ms = **6.24×**. Leaves ~12 ms of
+      vertex-after-cell tail.
+    - *(II) `rayon::join(cell_par, vertex_par)`*: 0.75 s at --max-n 104,
+      **3.4× SLOWER** than (I). Main-thread join overhead × 105 outer
+      calls dominates (above).
+    - *(III) Single union par_iter over `(cell ∪ vertex)` buckets,
+      tagged `(is_vertex, ax)`, default chunking*: single-call n=104 =
+      **170 ms = 2.81× — REGRESSION**. Rayon's adaptive splittable
+      producer over a Vec chunks consecutive items together; cell tasks
+      first then vertex tasks ⇒ a chunk gets ~6 heavy cell buckets
+      (~300 ms of work) while another chunk gets all-vertex (~5 ms) ⇒
+      severe load imbalance.
+    - *(IV) Same as (III) + `.with_max_len(1)`*: forces one bucket per
+      task ⇒ rayon's work-stealer balances per-bucket. **Single-call
+      n=104 = 69 ms = 6.94×** — beats (I) by 9 % and approaches the
+      cell-only Amdahl floor (61 ms, the longest single cell bucket).
+      The vertex work is now absorbed into the cell-tail idle.
+    - **--max-n 104 best-of-7:** (I) 0.22 s vs (IV) **0.20 s = 5.25×
+      vs serial** (was 4.77×). Crossover point n where parallel pays
+      drops slightly because *one* par_iter has half the fixed-overhead
+      of (I)'s two par_iters (≈25 µs vs ≈50 µs per call).
+    - **Why `with_max_len(1)` is necessary, not a one-bucket-list win:**
+      cell-only and vertex-only par_iters individually have *homogeneous*
+      task costs (heavy plateau ax=1..6 within ~1.5× of each other), so
+      default adaptive chunking balances fine within a center; (I)
+      worked. The union (III) is *heterogeneous* — cell buckets ≫ vertex
+      buckets — and chunking groups them badly. (IV) reverts to one-per-
+      task, restoring fan-out semantics. Tier-1 measurement: tier-3
+      "single par_iter should be at least as fast as two" reasoning was
+      partially wrong — true only when scheduling granularity matches
+      the workload heterogeneity. Recorded inline in `count_parallel` so
+      `with_max_len(1)` is not removed as "unused tuning."
+    - **Net cumulative speedup at n=104 (vs serial baseline):** single-
+      call **6.94×**; --max-n 104 aggregate **5.25×**. Approaches the
+      analytic ceiling (~6.9× from the longest-single-bucket Amdahl
+      floor); the remaining ~5 % is Apple Silicon P/E asymmetry.
+      Diagnostic tests `time_cell_buckets_n104` and `time_single_call_n104`
+      retained as `#[ignore]`d benches for reproduction.
 
 ## Resolved / evaluated-and-rejected (do not re-propose)
 
