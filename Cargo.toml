@@ -5,12 +5,10 @@ edition = "2021"
 description = "Enumerate OEIS A142886: polyominoes with the full D8 (square) symmetry group"
 license = "MIT OR Apache-2.0"
 
-[features]
-# Optional data-parallel enumeration over independent recursion subtrees.
-parallel = ["dep:rayon"]
-
 [dependencies]
-rayon = { version = "1", optional = true }
+# Data-parallel enumeration over independent x-axis buckets. Runtime-gated
+# by the `--parallel` CLI flag (one binary times serial vs parallel).
+rayon = "1"
 
 [lib]
 name = "a142886"

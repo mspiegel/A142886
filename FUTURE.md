@@ -179,6 +179,70 @@ _No deferred work is currently parked._
     high-`ax`/low-slack/few-slice tail, total only at the closed-form
     boundary. Vertex satisfies early always, by the even-`d` parity.
 
+## Shipped — parallel axis (count-preserving)
+
+- **`rayon`-over-buckets — SHIPPED (~4.8× on 12-core Apple Silicon at
+  n=104).** The independent x-axis buckets `A=(ax,0)` (per
+  `enumerate<VERTEX>`) are fanned out via `rayon::par_iter` — one task per
+  live bucket, each task allocates its own `CellState` + `untried`, returns
+  a `Count`, sums commute. Runtime-gated by a `--parallel` CLI flag
+  (rayon always linked); no Cargo feature, single binary for A/B.
+  **Correctness:** byte-identical to serial for n=0..=120 (`diff` clean on
+  `--max-n 120` outputs); `--parallel --verify` all-match vs `REFERENCE`
+  *and* `b142886.txt` n≤68; new `parallel_matches_serial_full_reference`
+  test asserts `count_parallel(n) == count(n)` and per-center for every n
+  in the embedded prefix.
+  **Measured (release, best-of-5, --max-n N, 12-core Apple Silicon, M-class):**
+
+  | n   | serial | parallel | speedup |
+  |-----|--------|----------|---------|
+  |  80 | 0.02 s | 0.00 s   | (tiny)  |
+  |  88 | 0.07 s | 0.02 s   | 3.5×    |
+  |  96 | 0.27 s | 0.06 s   | 4.5×    |
+  | 100 | 0.53 s | 0.11 s   | 4.8×    |
+  | 104 | 1.05 s | 0.22 s   | 4.8×    |
+
+  **Thread scaling at n=104** (best-of-5): 1→1.05, 2→0.81, 4→0.43, 6→0.42,
+  8→0.22, 10→0.22, 12→0.21. Flat past 8 threads — consistent with
+  Apple Silicon's 4 P-core + 8 E-core split *and* the measured per-bucket
+  profile (longest single bucket ≈16 % of cell work ⇒ critical-path
+  ceiling ≈6× even on infinite cores; subtree-level parallelism inside
+  `grow` would be needed to break that wall, separate deeper lever).
+  - **Sub-finding — `rayon::join` over cell+vertex: rejected (3.4× slower).**
+    The plan was to `rayon::join(|| cell_par, || vertex_par)` at the top
+    of `count_parallel` so workers cross-steal between centers and fill
+    the cell-tail idle (~16 % of cell). **Measured:** join = 0.75 s vs
+    sequential c+v = 0.22 s at --max-n 104. Each inner `count_*_parallel`
+    *already* fans out to the global pool via `par_iter`, so the outer
+    join from a non-worker (main) thread adds synchronization overhead
+    without parallelizing anything new — ~0.5 s of overhead accumulated
+    across the binary's outer `for n in 0..=N` loop (105 join calls).
+    Sequential cell-then-vertex at the top level keeps inner pool
+    saturation and avoids the join cost. Another tier-3 reasoning (cell-
+    tail savings analytic) overturned by tier-1 measurement (per-call
+    main-thread join overhead dominates). Comment in `count_parallel`
+    records the finding inline so it isn't re-proposed.
+  - **Per-center speedup is the real signal.** With `--center cell
+    --parallel` (cell-only path, no join): 0.92 → 0.19 s = **4.8× at
+    n=104**. `--center vertex --parallel`: 0.12 → 0.02 s = **6×**.
+    Combining via sequential c+v: 1.05 → 0.22 s = **4.8×**. So the
+    bucket-level par_iter is the genuine parallel win; the outer
+    composition is a wash (sequential beats join here).
+  - **Wall remaining:** the longest single bucket dictates the critical
+    path. From FUTURE.md's measured per-bucket profile (n=88 cell: ax=3
+    is 16.5 % of cell time), the analytic ceiling is ~6× and we measure
+    ~4.8× on real silicon, so ~80 % of ideal — the remaining gap is
+    E-core slowdown plus the cell-tail idle that join *would* have
+    filled (but at higher cost than it saves). Subtree-level parallelism
+    in `grow` (rayon over post-§4.1 independent recursion subtrees, the
+    A-lever named in FUTURE.md for the post-§4.1 body) is the open next
+    parallel lever; not pursued here.
+  - **Scope/limits:** bucket-level only; the `grow` recursion itself is
+    unchanged. `--max-n` outer loop stays sequential (exponential cost
+    dominated by the largest n; parallelizing the outer loop would
+    oversubscribe without gain). Parallel path is opt-in via
+    `--parallel`; serial path unchanged and is the default.
+
 ## Resolved / evaluated-and-rejected (do not re-propose)
 
 - **Transfer matrix for n ≫ 110 (M6) — BUILT, PROFILED, REJECTED.** The
