@@ -357,6 +357,43 @@ _No deferred work is currently parked._
       lever; not pursued here.
     - **Net cumulative speedup at n=104 (vs serial baseline):** single-
       call **7.74×**; --max-n 104 aggregate **~5.6×**.
+    - **Threshold sweep — measured, kept "every bucket" (∼3-5 % win not
+      worth the n-dependent knob).** Question from the original plan
+      ("apply subtree-parallel to every bucket, or only heavy ones?")
+      revisited with measurement. New `threshold_sweep_n104` diagnostic
+      (#[ignore]'d) dispatches each bucket task to `run_bucket::<true>`
+      vs `run_bucket::<false>` based on a heaviness predictor
+      `headroom = n − ws − edge_reach_lb(td, gap)`; cell ax≥1 and
+      vertex ax≥1 simplify to `headroom = n − 8·ax`. **T=0** = every
+      bucket parallel-top (currently shipped); **T=∞** = no subtree
+      parallel anywhere (= pre-lever-2 / lever-3-only shipped). Best-of-
+      15 × 3 runs at n=104 (best-of-5/3 runs initial; tightened where
+      signals were marginal):
+
+      | T   | mean speedup vs T=0 | notes |
+      |-----|--------------------:|-------|
+      |  0  | 1.000× | current shipped |
+      | 24  | +1.6 % | wash on individual runs |
+      | 28  | **+4.8 %** | best mean; run variance ~9 % |
+      | 32  | +3.7 % | stable across all 3 runs |
+      | 36  | −1.3 % | noise |
+      | 40  | +3.6 % | comparable to T=32 |
+      | 56  | mixed  | edge of noise band |
+      | ≥64 | progressively worse | over-trimming, loses parallel win |
+      | ∞   | **−10 %** | confirms lever-2 contributes ~10 % |
+
+      **Decision: skip the threshold, keep "every bucket".** The win is
+      real but small (~3-5 % single-call at n=104, ~1-2 % on the binary's
+      `--max-n` wall-clock) and the per-run variance (~9 %) is
+      comparable to the signal. Picking a threshold pays an
+      n-dependent knob (`T` should scale with n — the candidate winners
+      lie around `headroom ≈ n/3 .. n/4`, i.e. `ax ≤ (n-T)/8 ≈ n/8 .. 9`
+      at n=104) for a payoff at the floor of what's measurable.
+      Defensible to revisit if and only if larger n shifts the
+      cost balance enough to push the signal clear of noise; diagnostic
+      retained for that. The "every bucket" choice in the lever-2 plan
+      was *slightly* suboptimal but the loss is single-digit-% within
+      noise band, not a tier-3-vs-tier-1 reversal.
 
 ## Resolved / evaluated-and-rejected (do not re-propose)
 

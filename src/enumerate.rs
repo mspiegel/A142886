@@ -1033,6 +1033,131 @@ mod tests {
         }
     }
 
+    /// Diagnostic: threshold sweep for the "should this bucket use
+    /// subtree (top-of-bucket) parallelism?" decision. At n=104, build
+    /// the same union (cell + vertex) bucket list `count_parallel` uses,
+    /// then for each threshold T par_iter over the tasks dispatching
+    /// each bucket to `run_bucket::<true, V>` (parallel-top) if
+    /// `headroom = n - ws - edge_reach_lb(td, gap) >= T`, else
+    /// `run_bucket::<false, V>` (serial top — just `grow`).
+    ///
+    /// **T = 0** = "every bucket parallel-top" = the current shipped
+    /// path. **T = ∞** = "every bucket serial top" = bucket-level
+    /// parallelism only (the pre-lever-2 / lever-3 shipped behaviour).
+    /// Sweep in between answers the open question: was "every bucket"
+    /// the right choice, or does a threshold do better?
+    ///
+    /// Run with: `cargo test --release threshold_sweep_n104 -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn threshold_sweep_n104() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        let n: usize = 104;
+        let n_u64 = n as u64;
+        let xmax = n_u64 as i32;
+
+        // Same union task list as count_parallel constructs (n%4==0 case).
+        let mut tasks: Vec<(bool, i32)> = Vec::new();
+        for ax in 1..=xmax {
+            tasks.push((false, ax)); // cell, skip apex
+        }
+        for ax in 0..=xmax {
+            tasks.push((true, ax)); // vertex, all
+        }
+
+        // Heaviness heuristic, mirroring the bucket-setup constants:
+        // ws = orbit_size(center, (ax,0))  (4 for non-apex; 1 for cell apex)
+        // td = (ax == 0 ? 1 : 0)
+        // edge_reach_lb(td, gap=ax) = 8*ax - 4 when td==0, else 0
+        // For ax==0 cell (apex): unused (skipped by residue rule at n%4==0).
+        // For ax>=1 (both centers): headroom = n - 4 - (8*ax - 4) = n - 8*ax.
+        // For ax==0 vertex: headroom = n - 4 - 0 = n - 4.
+        let headroom = |is_vertex: bool, ax: i32| -> i64 {
+            let ws: i64 = if !is_vertex && ax == 0 { 1 } else { 4 };
+            // td is set (gap-0 touched) at any ax==0 seed — for both
+            // centers (cell apex; vertex 2×2-core). For ax≥1 the seed
+            // is on the x-axis but off-diagonal, td=0 ⇒ active prune.
+            // (Cell apex bucket is skipped by the n%4==0 residue rule
+            // anyway; this diagnostic targets n=104.)
+            let lb: i64 = if ax == 0 { 0 } else { 8 * (ax as i64) - 4 };
+            n as i64 - ws - lb
+        };
+
+        // Time the union par_iter with a given threshold (cell+vertex,
+        // .with_max_len(1)). Best-of-5.
+        let time_at = |t: i64| -> (f64, Count) {
+            let mut best = f64::INFINITY;
+            let mut last: Count = 0;
+            for _ in 0..5 {
+                let start = Instant::now();
+                let total: Count = tasks
+                    .par_iter()
+                    .copied()
+                    .with_max_len(1)
+                    .map(|(is_vertex, ax)| {
+                        let parallel_top = headroom(is_vertex, ax) >= t;
+                        match (parallel_top, is_vertex) {
+                            (true, true) => run_bucket::<true, true>(n_u64, ax, xmax),
+                            (true, false) => run_bucket::<true, false>(n_u64, ax, xmax),
+                            (false, true) => run_bucket::<false, true>(n_u64, ax, xmax),
+                            (false, false) => run_bucket::<false, false>(n_u64, ax, xmax),
+                        }
+                    })
+                    .sum();
+                let elapsed = start.elapsed().as_secs_f64();
+                if elapsed < best {
+                    best = elapsed;
+                }
+                last = total;
+            }
+            (best, last)
+        };
+
+        // Sweep thresholds: T=0 (all parallel-top, current shipped),
+        // i64::MAX (all serial top, pre-lever-2), then a series.
+        let thresholds: Vec<i64> = vec![0, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, i64::MAX];
+
+        println!("\nn={n} threshold sweep (union par_iter, best-of-5):");
+        println!(
+            "  T        wall(s)  speedup-vs-T0   #parallel  #serial   verdict"
+        );
+        let (t0_wall, t0_count) = time_at(0);
+        for &t in &thresholds {
+            let (wall, count) = if t == 0 {
+                (t0_wall, t0_count)
+            } else {
+                time_at(t)
+            };
+            assert_eq!(
+                count, t0_count,
+                "threshold {t}: count {count} != T=0 count {t0_count}"
+            );
+            // Count how many buckets go to each path at this T.
+            let n_par = tasks
+                .iter()
+                .filter(|&&(v, ax)| headroom(v, ax) >= t)
+                .count();
+            let n_ser = tasks.len() - n_par;
+            let speedup = t0_wall / wall;
+            let verdict = if wall < t0_wall * 0.99 {
+                "BETTER"
+            } else if wall > t0_wall * 1.01 {
+                "worse"
+            } else {
+                "wash"
+            };
+            let t_str = if t == i64::MAX {
+                "∞".to_string()
+            } else {
+                t.to_string()
+            };
+            println!(
+                "  {t_str:>6}  {wall:.4}   {speedup:6.3}x         {n_par:>3}        {n_ser:>3}    {verdict}"
+            );
+        }
+    }
+
     /// Diagnostic: per-n single-call wall-time for `count` (serial) vs
     /// `count_parallel`, to find the crossover where parallel starts
     /// paying off vs paying overhead. Best-of-5, adaptive iteration
