@@ -386,7 +386,7 @@ fn run_bucket<const PARALLEL_TOP: bool, const VERTEX: bool>(
 ///
 /// `parallel = true` distributes the independent x-axis buckets across
 /// the rayon global thread pool (one bucket = one task; rayon's
-/// work-stealer handles the ≤1.5× heavy-plateau imbalance — see FUTURE.md
+/// work-stealer handles the ≤1.5× heavy-plateau imbalance — see PERFORMANCE.md
 /// per-bucket profile). Counts are byte-identical because each bucket is
 /// fully self-contained (its own scratch, additive contribution to a
 /// commutative `u64` sum).
@@ -612,7 +612,7 @@ fn process_one_pos<const SAT: bool, const VERTEX: bool>(
                 // child subtree takes the SAT specialization. (On the SAT
                 // path this is the only arm; the else is folded out.)
                 if n - w2 == 4 {
-                    // R=4 tail-fold (DESIGN/FUTURE lever G). The SAT
+                    // R=4 tail-fold (DESIGN/PERFORMANCE lever G). The SAT
                     // child has remaining budget 4. Every cell is
                     // weight ∈ {4,8} (the only weight-1 cell, the apex,
                     // is the seed or forbidden, so never a fresh

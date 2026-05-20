@@ -150,7 +150,7 @@ two-terminal `(A,B)` variant pinning the minimal diagonal cell was evaluated
 and was not faster once §4.6 / x-axis bucketing was in place — see §4.5 — so
 it is not pursued. The transfer/kernel reformulation was reopened and
 **built/measured under M6 for the n ≫ 110 regime, then rejected** with hard
-numbers — see §4.7 / FUTURE.md.)
+numbers — see §4.7 / PERFORMANCE.md.)
 
 **Acceptance:** `cargo test --release -- --ignored` matches the b-file to
 n=68 with zero mismatches — **met**.
@@ -179,14 +179,14 @@ so the repo is back at the M5 state.
 - [x] **Phase 5 — NO-GO.** The state-count floor (≈1.23ⁿ) is strictly above
       the §4.6 enumerator (≈1.19ⁿ), so even an idealized cell-by-cell rewrite
       is asymptotically *worse*; n=140/160 infeasible. Discarded `transfer`,
-      reverted the split, numbers recorded in FUTURE.md.
+      reverted the split, numbers recorded in PERFORMANCE.md.
 
 **Outcome:** correctness was never the issue (byte-identical through n≤57);
 the asymptotics are. The transfer matrix on A142886's own D₈ wedge does not
 yield an output-sized state space, so the §4.5 rejection **extends to
 n ≫ 110**. The b-file's depth is the §3.3 composition of *siblings* (computed
 by transfer matrices on far smaller fundamental regions), not a transfer
-matrix on this wedge. Repo reverted to M5; DESIGN/PLAN/FUTURE kept in sync.
+matrix on this wedge. Repo reverted to M5; DESIGN/PLAN/PERFORMANCE kept in sync.
 
 ## Traceability
 

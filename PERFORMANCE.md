@@ -1,7 +1,12 @@
-# FUTURE — deferred work for A142886
+# PERFORMANCE — measurement log and deferred work for A142886
 
-Parked, not in progress. Captured here so it need not be re-derived or
-re-raised in conversation.
+Rolling record of (1) tier-1 measurements made along the optimization
+path — what shipped, what was measured-and-rejected, and the numbers
+behind each decision — and (2) deferred work parked here so it need
+not be re-derived or re-raised in conversation. Older notes and
+cross-references may still refer to this file by its prior name
+("PERFORMANCE.md"); the project history at and below commit `ced6e00`
+preserves that name.
 
 _No deferred work is currently parked._
 
@@ -229,13 +234,13 @@ _No deferred work is currently parked._
     bucket-level par_iter is the genuine parallel win; the outer
     composition is a wash (sequential beats join here).
   - **Wall remaining:** the longest single bucket dictates the critical
-    path. From FUTURE.md's measured per-bucket profile (n=88 cell: ax=3
+    path. From PERFORMANCE.md's measured per-bucket profile (n=88 cell: ax=3
     is 16.5 % of cell time), the analytic ceiling is ~6× and we measure
     ~4.8× on real silicon, so ~80 % of ideal — the remaining gap is
     E-core slowdown plus the cell-tail idle that join *would* have
     filled (but at higher cost than it saves). Subtree-level parallelism
     in `grow` (rayon over post-§4.1 independent recursion subtrees, the
-    A-lever named in FUTURE.md for the post-§4.1 body) is the open next
+    A-lever named in PERFORMANCE.md for the post-§4.1 body) is the open next
     parallel lever; not pursued here.
   - **Scope/limits:** bucket-level only; the `grow` recursion itself is
     unchanged. `--max-n` outer loop stays sequential (exponential cost
@@ -395,7 +400,7 @@ _No deferred work is currently parked._
         (out of scope per the §4.5 / §4.7 floors), (ii) platform-
         specific P-core affinity for the dominant sub-task, or
         (iii) re-opened single-core inner-loop work (the lever B class
-        from FUTURE.md) — none of which is bucket-level parallelism.
+        from PERFORMANCE.md) — none of which is bucket-level parallelism.
         Diagnostic test deleted (one-off; the v0-symbol + sample(1)
         workflow is documented here for reproduction).
     - **Threshold sweep — measured, kept "every bucket" (∼3-5 % win not
@@ -623,7 +628,7 @@ _No deferred work is currently parked._
       output ≈1.19ⁿ. **The user's idea, fully unpacked, reduces to E and
       is closed by the §4.7 floor — now with the added empirical fact that
       the finest (slice-level) key already has zero reuse.** Caveat logged
-      per "FUTURE.md is not proof": §4.7 only *measured* the anti-diagonal
+      per "PERFORMANCE.md is not proof": §4.7 only *measured* the anti-diagonal
       cut; this probe supplies the missing measurement for the slice-level
       cut (mult ≡ 1) so the "any DP" closure is now empirically anchored at
       both ends, not asserted. Instrumentation reverted.
@@ -856,7 +861,7 @@ _No deferred work is currently parked._
         fixed φ"). The ≤28% cost stands measured, but is **not** cheaply
         recoverable. Prototype reverted; lesson: a paper "theorem" here
         is not proof — only the byte-identical oracle is (cf. the
-        standing FUTURE.md-is-not-proof principle, applied to my own
+        standing PERFORMANCE.md-is-not-proof (formerly FUTURE.md-is-not-proof) principle, applied to my own
         crack).
       - **STRATEGY PIVOT (different angle — represent, don't eliminate).**
         Generalising the refutation: the gate fails for *every* static

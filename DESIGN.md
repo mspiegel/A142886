@@ -497,7 +497,7 @@ does not collapse to output size. The §4.5 rejection therefore **extends to
 n ≫ 110**; the b-file's depth comes from the §3.3 composition of *siblings*
 (themselves computed by transfer matrices on far smaller fundamental
 regions), not from a transfer matrix on A142886's own wedge. The split was
-a pure `git mv`, reverted cleanly; numbers recorded in FUTURE.md. This
+a pure `git mv`, reverted cleanly; numbers recorded in PERFORMANCE.md. This
 confirms the closed-ledger conclusion: more terms = more compute, not a
 transfer-matrix algorithm swap.
 
