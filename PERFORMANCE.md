@@ -403,6 +403,51 @@ _No deferred work is currently parked._
         from PERFORMANCE.md) — none of which is bucket-level parallelism.
         Diagnostic test deleted (one-off; the v0-symbol + sample(1)
         workflow is documented here for reproduction).
+      - **Parallel-path sample(1) profile — confirms no hidden hotspots
+        beyond the analytic model.** Same workflow applied to
+        `count_parallel(104)` looped 200× in a throwaway test
+        (`profile_parallel_loop`, since deleted). 5-second sample over
+        14 threads (12 workers + main + test); 39 270 samples total.
+        **Per-worker breakdown (averaged across the 12 rayon workers):**
+        - **~76 %** in `WorkerThread::wait_until_cold + 1172`
+          (`Job::execute` → ... → `grow`) = real work execution.
+        - **~24 %** in `WorkerThread::wait_until_cold + 208` →
+          `Sleep::sleep` = Amdahl scheduling tail / idle wait.
+
+        **Inside the busy 76 %:**
+        - ~85 % in `grow` (algorithm, all 4 monomorphizations).
+        - ~14 % in rayon plumbing (`bridge_producer_consumer::helper`,
+          `join_context` closures, `StackJob::execute`).
+        - **< 1 %** in `CellState::clone` / `memmove` / `RawVec::grow_one`
+          (combined: 2 `memmove` + ~5 `RawVec::grow_one` samples out of
+          ~33 k worker samples).
+
+        **Net composition** of total worker thread-time:
+        ≈ **64 %** `grow` + **11 %** rayon plumbing + **24 %** idle waits
+        + **< 1 %** clone/alloc. Headlines:
+        - **CellState::clone (11 KB memcpy per top-of-bucket sub-task)
+          is empirically invisible** at 1 ms sampling. State pooling
+          will not help; the clone fits in L1 and runs in microseconds.
+          Refutes the pre-measurement worry that per-sub-task cloning
+          might be a meaningful slice. Tier-1 measurement overturns
+          tier-3 reasoning, recorded so it isn't re-proposed.
+        - **Rayon plumbing is ~11 %** of total — real but small.
+          Reducing it requires reducing task count (e.g., dropping
+          `with_max_len(1)` or removing the depth-0 sub-fan-out),
+          both of which trade away measured wins (lever 2 +9 %,
+          union-`max_len(1)` +9 %). Net negative.
+        - **Amdahl idle (~24 %) is the dominant non-work slice** — same
+          phenomenon the thread-scaling diagnostic showed plateauing
+          at 8 threads pre-lever-2 and continuing 8→12 post-lever-2.
+          Already characterized; not a parallel lever.
+
+        **Bottom line.** No hidden parallel hotspot. The 7.74× single-
+        call wall is exactly what the analytic model predicts:
+        irreducible algorithm work + measured-cheap rayon plumbing +
+        Amdahl scheduling tail. Future wins past 7.74× still require
+        either algorithmic change, P-core affinity, or re-opened
+        single-core inner-loop work — none is parallel orchestration.
+        Diagnostic test deleted; numbers preserved here.
     - **Threshold sweep — measured, kept "every bucket" (∼3-5 % win not
       worth the n-dependent knob).** Question from the original plan
       ("apply subtree-parallel to every bucket, or only heavy ones?")
