@@ -675,6 +675,32 @@ _No deferred work is currently parked._
         **Stack:** small, clean, single-line change to the `NEIGHBOURS`
         constant — no other code touched. Closes the last item in the
         "deferred but not rejected" list under lever B.
+      - **`BucketCtx` (pack `n`/`seed`/`xmax` into `&BucketCtx`) —
+        measured, NO-GO (~0 % wash, slight regression in noise).**
+        Idea (post-parallel sample(1) profile observation): grow takes
+        10 args; ARM64 spills past 8 → 2 stack slots per recursive
+        frame; the heaviest-bucket profile attributed ~25 % of leaf
+        self-time to the `+880..+1020` pre-recursive-call register-
+        save / arg-shuffle. The three constants (`n`, `seed`, `xmax`)
+        are loop-invariant through the whole bucket recursion, so
+        packing them into `struct BucketCtx { n: u64, seed: Cell, xmax: i32 }`
+        and threading `&BucketCtx` through `grow` / `process_one_pos`
+        / `process_one_pos_cloned` / `grow_parallel_top` *should*
+        shrink grow's arg count from 10 to 8 → fits exactly in regs.
+        **Measured (release, n=104, best-of-5/7 × 3 runs):** all
+        metrics within noise (cell single-call serial 0.410→0.412,
+        --max-n 104 serial 0.98→0.99, parallel paths unchanged) —
+        kill criterion (ratio ≥ ~0.99 vs shipped) triggered on every
+        metric. **Reverted.** Confirms the closed micro-class: the
+        compiler (LLVM, with the const-generic monomorphization here)
+        is already doing scalar-replacement of the three constants
+        across the recursive call boundary, so manually packing them
+        adds an indirection (one ptr-load on the callee side) without
+        saving the spill. Same pattern as lever I (iterative DFS,
+        −19 %) and the pre-§4.1 `td`-elimination (~0 % wash): **call-
+        shape / dead-param / constant-arg micro-specialization is a
+        closed class** for this codebase under release+LTO+cgu=1.
+        **Do not re-propose** struct-packing of grow's constant args.
     - **(C) Analytic short-circuit of exactly-solvable sub-buckets —
       measured; broader than "one bucket", but a diminishing factor.**
       The proven `s=0` boundary closed form `2^(n/8−1)` is the degenerate
