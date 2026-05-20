@@ -701,6 +701,32 @@ _No deferred work is currently parked._
         shape / dead-param / constant-arg micro-specialization is a
         closed class** for this codebase under release+LTO+cgu=1.
         **Do not re-propose** struct-packing of grow's constant args.
+      - **`Vec::with_capacity` for `untried` — measured, NO-GO (~0 %
+        wash, slight regression in noise).** Binary disassembly of the
+        v0-mangled grow showed 4 separate `bl __RawVec::grow_one`
+        slow-paths (one per `NEIGHBOURS::push` site), each conditionally
+        skipped via `b.ne` when capacity is available. Hypothesis:
+        pre-reserving `untried.capacity` in `run_bucket` makes the
+        rare initial reallocs cheaper (one big `with_capacity` syscall
+        vs ~7 geometric reallocs starting at 4 → 8 → 16 → … → 128).
+        Bound chosen: `(n*5)/4 + 8` (covers `5·|S|` worst case from the
+        |S| ≤ n/4 + 1 cell-budget bound). **Measured (release, n=104,
+        best-of-5/7 × 3 runs):** all metrics within 0–1 % of shipped;
+        cell single-call serial 0.410→0.414, --max-n 104 serial
+        0.98→0.99, parallel paths unchanged. Kill criterion (ratio ≥
+        ~0.99 vs shipped) triggered on serial metrics. **Reverted.**
+        Two reasons the win didn't materialize: (1) the function-code
+        size is unchanged — the `bl grow_one` call sites stay in the
+        disassembly because Vec::push doesn't know capacity at codegen
+        time; only the *execution* of those bl's becomes even less
+        likely (they were already <1 % of samples per the parallel
+        profile). (2) The pre-reserve syscall costs roughly the same
+        as the few small reallocs it eliminates, with the bound being
+        a bit generous. Confirms (a) compile-time grow_one elision
+        requires `unsafe` (closed via lever B #2) and (b) runtime
+        allocator activity is *not* a hotspot for this workload at
+        n=104. **Do not re-propose** `Vec::with_capacity` micro-tuning
+        on `untried`.
     - **(C) Analytic short-circuit of exactly-solvable sub-buckets —
       measured; broader than "one bucket", but a diminishing factor.**
       The proven `s=0` boundary closed form `2^(n/8−1)` is the degenerate
