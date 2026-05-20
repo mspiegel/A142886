@@ -284,6 +284,79 @@ _No deferred work is currently parked._
       floor); the remaining ~5 % is Apple Silicon P/E asymmetry.
       Diagnostic tests `time_cell_buckets_n104` and `time_single_call_n104`
       retained as `#[ignore]`d benches for reproduction.
+  - **REFINEMENT — subtree-level parallelism (top-of-bucket fan-out):
+    SHIPPED (~+9 % on top, breaks the per-bucket Amdahl wall).** Each
+    parallel-mode bucket task fans out *its* top-level frontier branches
+    (≤4 cells) across the rayon global pool — nested rayon: the bucket
+    task is itself a rayon task, and inside it spawns sub-tasks for the
+    top-of-`grow` for-loop. Per-task clone of `CellState` (~11 KB at
+    n=104, microseconds) + `untried` template; before calling
+    `process_one_pos` each sub-task pre-applies the serial loop's
+    `set_blocked_at(ci)` effect for `untried[..pos]` so the cloned state
+    matches what serial-grow would see at iteration `pos`. Byte-identical
+    by construction; oracle test asserts `count_parallel == count` for
+    every n in the embedded prefix.
+    - **Refactor required (`process_one_pos`).** The for-loop body of
+      `grow` was extracted as `process_one_pos<SAT, VERTEX>` so the same
+      iteration logic is invoked both serially (from `grow`) and in
+      parallel (from `grow_parallel_top`). The serial path stays
+      sequential — `run_bucket<PARALLEL_TOP, VERTEX>` const-generic
+      picks the runner; serial uses `grow`, parallel uses
+      `grow_parallel_top`. *Without `#[inline(always)]` on
+      `process_one_pos`, the serial path regresses ~13 % (LLVM does not
+      inline the extracted body even with `#[inline]`). `inline(always)`
+      restores parity.* Tier-1 measured: forced inlining is *load-
+      bearing*, not optional tuning. Recorded inline so it's not
+      removed.
+    - **Top-of-bucket only (depth 0).** Below the bucket root, recursion
+      stays serial. The heavy cell-plateau buckets all have 2 frontier
+      cells (`(ax+1, 0)` and `(ax, 1)`, with `(ax-1, 0)` x-axis-forbidden
+      and `(ax, -1)` out of wedge), so each heavy bucket splits into 2
+      sub-tasks. That's enough to break the Amdahl wall: thread scaling
+      stops plateauing at 8 threads.
+    - **Measured (release, --max-n 104, best-of-5/7, 12-core Apple
+      Silicon):**
+
+      | metric                  | lever 3 ship | lever 2 ship | change |
+      |-------------------------|-------------:|-------------:|-------:|
+      | single-call count_parallel(104) | 0.069 s | **0.063 s** | **−9 %** |
+      | --max-n 104 best-of-7    | 0.20 s   | **0.19 s** | −5 %  |
+      | speedup vs serial        | 6.94×    | **7.74×**  | +0.80 |
+
+    - **Thread scaling (the diagnostic):**
+
+      |  T |  L3 (s) |  L2 (s) | Δ |
+      |---:|--------:|--------:|---:|
+      |  1 | 1.05 | 1.04 | — |
+      |  2 | 0.81 | **0.56** | **−31 %** |
+      |  4 | 0.43 | **0.33** | **−23 %** |
+      |  6 | 0.42 | **0.25** | **−40 %** |
+      |  8 | 0.22 | 0.21 | — |
+      | 10 | 0.22 | **0.19** | −14 % |
+      | 12 | 0.21 | **0.18** | −14 % |
+
+      L3's plateau at 8 threads (the longest-single-bucket Amdahl wall)
+      is gone in L2. Continued scaling 8→12 confirms the heaviest bucket
+      is now actually subdivided across cores. The 6-thread jump is
+      especially striking — L3 wasted P+E cores on the unsplittable
+      bucket; L2 keeps them busy via the sub-task fan-out.
+    - **Why only ~9 % on a 2-way split.** Theoretical: longest cell
+      bucket (ax=3, 61 ms) → 2 sub-tasks → if equal, 30 ms → floor
+      drops by ~31 ms = ~45 % parallel wall-time. Actual ~9 %. Reasons:
+      (a) Redelmeier exclusion makes the second sub-task much smaller
+      (`(ax+1, 0)` subtree dwarfs `(ax, 1)` subtree at heavy ax). (b) 2
+      sub-tasks fight for cores against the other ~50 sub-tasks from
+      26 buckets — the heaviest sub-task isn't necessarily the last
+      thing standing. The bigger win is in *thread-scaling shape* (the
+      table above) — at intermediate T the wall drops dramatically.
+    - **Scope/limits.** Bucket top-only; the `grow` recursion below
+      depth 0 stays serial. Depth-1 split would add up to 16 sub-tasks
+      per heavy bucket; gain bound by the same uneven-split argument
+      (a deeper branch of the unequal tree is just smaller), so
+      probably another single-digit %, more code. Open as a follow-on
+      lever; not pursued here.
+    - **Net cumulative speedup at n=104 (vs serial baseline):** single-
+      call **7.74×**; --max-n 104 aggregate **~5.6×**.
 
 ## Resolved / evaluated-and-rejected (do not re-propose)
 

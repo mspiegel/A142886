@@ -47,6 +47,7 @@ use rayon::prelude::*;
 /// && !in_untried` in a single byte read; every transition is
 /// `debug_assert`-guarded so a stray edge is caught in test builds in
 /// addition to the byte-identical oracle.
+#[derive(Clone)]
 struct CellState {
     s: Vec<u8>,
     stride: usize,
@@ -277,13 +278,28 @@ fn wedge_orbit_size_no_apex<const VERTEX: bool>(c: Cell) -> u64 {
 }
 
 /// Per-bucket worker: enumerate the contribution of a single x-axis bucket
-/// `A = (ax, 0)`. Pure function of `(n, ax, xmax, VERTEX)` — allocates its
-/// own `CellState` and `untried` buffer and returns the bucket's count.
-/// This is what each rayon task runs in the parallel path; the serial
-/// path calls it sequentially. Body is byte-identical to the prior
-/// per-iteration loop body (just hoisted into a function, returning a
-/// local `Count` rather than `*total += `).
-fn run_bucket<const VERTEX: bool>(n: u64, ax: i32, xmax: i32) -> Count {
+/// `A = (ax, 0)`. Pure function of `(n, ax, xmax, PARALLEL_TOP, VERTEX)`.
+///
+/// **`const PARALLEL_TOP`** picks the per-bucket runner:
+/// - `false` (serial path): top-level branches are processed sequentially
+///   by [`grow`]. The `CellState` + `untried` are reused down the
+///   recursion (push/truncate, blocked-set discipline).
+/// - `true` (parallel path): top-level branches are fanned out across the
+///   rayon global pool by [`grow_parallel_top`]. Each branch clones the
+///   bucket's initial `CellState` + `untried` and runs its subtree
+///   independently. Nested under the bucket-level [`enumerate`] /
+///   [`count_parallel`] par_iter, so the global pool services both
+///   bucket-level and subtree-level tasks via work-stealing.
+///
+/// `PARALLEL_TOP=true` makes the bucket effectively parallel inside;
+/// keeping the serial path on `PARALLEL_TOP=false` means
+/// `count_cell_centered` (no `--parallel`) stays a true single-thread
+/// enumeration — the apples-to-apples baseline for measurement.
+fn run_bucket<const PARALLEL_TOP: bool, const VERTEX: bool>(
+    n: u64,
+    ax: i32,
+    xmax: i32,
+) -> Count {
     let center = if VERTEX { Center::Vertex } else { Center::Cell };
     let seed = (ax, 0);
     let ws = orbit_size(center, seed) as u64;
@@ -303,8 +319,8 @@ fn run_bucket<const VERTEX: bool>(n: u64, ax: i32, xmax: i32) -> Count {
     if ws + edge_reach_lb(td, seed.0 - seed.1) > n {
         return 0;
     }
-    // Scratch structures allocated once per bucket and reused across the
-    // bucket's entire recursion subtree (push/truncate, never per-node).
+    // Bucket initial state. In the parallel path these become templates
+    // that `grow_parallel_top` clones per top-level branch.
     let mut st = CellState::new(xmax);
     st.place_seed(seed);
     let mut untried: Vec<Cell> = Vec::new();
@@ -315,37 +331,54 @@ fn run_bucket<const VERTEX: bool>(n: u64, ax: i32, xmax: i32) -> Count {
             untried.push(nb);
         }
     }
-    let mut total: Count = 0;
-    if td > 0 {
-        // Seed already satisfies §4.1 (ax==0: apex / 2×2 core) — straight
-        // into the SAT specialization (td/min_gap unused there ⇒ 0).
-        grow::<true, VERTEX>(
-            n,
-            seed,
-            xmax,
-            &mut st,
-            ws,
-            0,
-            0,
-            0,
-            &mut untried,
-            &mut total,
-        );
+    if PARALLEL_TOP {
+        if td > 0 {
+            grow_parallel_top::<true, VERTEX>(n, seed, xmax, &st, ws, 0, 0, &untried)
+        } else {
+            grow_parallel_top::<false, VERTEX>(
+                n,
+                seed,
+                xmax,
+                &st,
+                ws,
+                td,
+                seed.0 - seed.1,
+                &untried,
+            )
+        }
     } else {
-        grow::<false, VERTEX>(
-            n,
-            seed,
-            xmax,
-            &mut st,
-            ws,
-            td,
-            seed.0 - seed.1,
-            0,
-            &mut untried,
-            &mut total,
-        );
+        let mut total: Count = 0;
+        if td > 0 {
+            // Seed already satisfies §4.1 — straight into SAT (td/min_gap
+            // unused, pass 0).
+            grow::<true, VERTEX>(
+                n,
+                seed,
+                xmax,
+                &mut st,
+                ws,
+                0,
+                0,
+                0,
+                &mut untried,
+                &mut total,
+            );
+        } else {
+            grow::<false, VERTEX>(
+                n,
+                seed,
+                xmax,
+                &mut st,
+                ws,
+                td,
+                seed.0 - seed.1,
+                0,
+                &mut untried,
+                &mut total,
+            );
+        }
+        total
     }
-    total
 }
 
 /// Count D8-symmetric polyominoes of `n` cells for one center type, by
@@ -402,18 +435,22 @@ fn enumerate<const VERTEX: bool>(n: usize, parallel: bool) -> Count {
         // One bucket = one rayon task. Materialise the live ax list so the
         // task source is a plain `Vec<i32>` (rayon's `into_par_iter` over a
         // `Vec` is the canonical par-iter; an inclusive range filtered with
-        // `live_bucket` would force a less-direct fan-out path).
+        // `live_bucket` would force a less-direct fan-out path). The bucket
+        // task itself uses `PARALLEL_TOP=true`, so within each bucket the
+        // top-level frontier branches also fan out (nested rayon).
         let live: Vec<i32> = (0..=xmax).filter(|&ax| live_bucket(ax)).collect();
         live.into_par_iter()
-            .map(|ax| run_bucket::<VERTEX>(n, ax, xmax))
+            .map(|ax| run_bucket::<true, VERTEX>(n, ax, xmax))
             .sum()
     } else {
+        // Pure serial path — `PARALLEL_TOP=false` keeps the bucket runner
+        // single-threaded. This is the apples-to-apples baseline.
         let mut total: Count = 0;
         for ax in 0..=xmax {
             if !live_bucket(ax) {
                 continue;
             }
-            total += run_bucket::<VERTEX>(n, ax, xmax);
+            total += run_bucket::<false, VERTEX>(n, ax, xmax);
         }
         total
     }
@@ -481,118 +518,15 @@ fn grow<const SAT: bool, const VERTEX: bool>(
     if !SAT && weight + edge_reach_lb(td, min_gap) > n {
         return;
     }
-    // Lever #1: the 4-neighbour `CellState` index is `ci ± 1` / `ci ± stride`
-    // (an add), not a fresh `x*stride + y` multiply. `stride` is fixed for
-    // the whole `grow` call; `ci = idx(c)` is computed once per `pos`.
-    let stride_i = st.stride as isize;
     let hi = untried.len(); // this level's frontier is untried[lo..hi]
     for pos in lo..hi {
-        let c = untried[pos];
-        let ci = st.idx(c);
-        let w2 = weight + wedge_orbit_size_no_apex::<VERTEX>(c);
-        if w2 <= n {
-            // tx ≡ 1 globally (seed on x-axis), so §4.1 reduces to `td`.
-            // SAT: ntd unused (folded away); 1 keeps the shared accept/
-            // dispatch expressions trivially true with no edge-class test.
-            let ntd = if SAT {
-                1
-            } else {
-                td + u32::from(on_diagonal_edge(c))
-            };
-            st.set_slice_at(ci);
-            if w2 == n {
-                // §4.1: connected by construction; x-axis is met at the seed,
-                // so only the diagonal touch (`td`) gates (unconditional SAT).
-                if SAT || ntd > 0 {
-                    *total += 1;
-                }
-                // cannot extend further (weight would exceed n)
-            } else {
-                // Every prior branch truncated back to `hi`, so the buffer
-                // ends exactly at this level's suffix here.
-                debug_assert_eq!(untried.len(), hi);
-                // Append c's fresh neighbours after the suffix. The membership
-                // index is `ci + (dx*stride + dy)` (add, not multiply); only
-                // formed after the wedge/xmax/forbidden guards pass (so it is
-                // provably in-bounds and == `idx(nb)`, asserted in debug).
-                for (dx, dy) in NEIGHBOURS {
-                    let nb = (c.0 + dx, c.1 + dy);
-                    if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) {
-                        let ni =
-                            ci.wrapping_add_signed(dx as isize * stride_i + dy as isize);
-                        debug_assert_eq!(ni, st.idx(nb));
-                        if st.is_free_at(ni) {
-                            st.set_queued_at(ni);
-                            untried.push(nb);
-                        }
-                    }
-                }
-                if SAT || ntd > 0 {
-                    // §4.1 satisfied (or already) — monotone, so the whole
-                    // child subtree takes the SAT specialization. (On the SAT
-                    // path this is the only arm; the else is folded out.)
-                    if n - w2 == 4 {
-                        // R=4 tail-fold (DESIGN/FUTURE lever G). The SAT
-                        // child has remaining budget 4. Every cell is
-                        // weight ∈ {4,8} (the only weight-1 cell, the apex,
-                        // is the seed or forbidden, so never a fresh
-                        // frontier cell). A weight-4 cell completes
-                        // (`w2'==n`) and is accepted unconditionally (SAT);
-                        // a weight-8 cell overshoots (`w2'=n+4>n`) and is
-                        // skipped. Either way the child never recurses and
-                        // never appends to `untried`, and its `blocked`
-                        // inserts are fully self-unwound and never read
-                        // (no neighbour expansion). So the child's entire
-                        // contribution is exactly the number of weight-4
-                        // cells in its frontier `untried[pos+1..]` — fold
-                        // it inline, skipping the call + per-node frame and
-                        // the blocked/unwind bookkeeping. Provably
-                        // count-identical to the recursion.
-                        for &nb in &untried[pos + 1..] {
-                            if wedge_orbit_size_no_apex::<VERTEX>(nb) == 4 {
-                                *total += 1;
-                            }
-                        }
-                    } else {
-                        grow::<true, VERTEX>(
-                            n,
-                            seed,
-                            xmax,
-                            st,
-                            w2,
-                            0,
-                            0,
-                            pos + 1,
-                            untried,
-                            total,
-                        );
-                    }
-                } else {
-                    grow::<false, VERTEX>(
-                        n,
-                        seed,
-                        xmax,
-                        st,
-                        w2,
-                        ntd,
-                        min_gap.min(c.0 - c.1),
-                        pos + 1,
-                        untried,
-                        total,
-                    );
-                }
-                // Drop this branch's appended neighbours. They leave the
-                // buffer here ⇒ QUEUED → FREE (the unique "dequeue" site).
-                while untried.len() > hi {
-                    let nb = untried.pop().unwrap();
-                    st.dequeue(nb);
-                }
-            }
-            st.unset_slice_at(ci); // SLICE → QUEUED (c is still in the buffer)
-        }
+        process_one_pos::<SAT, VERTEX>(
+            n, seed, xmax, st, weight, td, min_gap, pos, hi, untried, total,
+        );
         // c is now excluded for this frame's later siblings. It was QUEUED
         // (a frontier cell still in the buffer, or just un-chosen above);
         // QUEUED → BLOCKED.
+        let ci = st.idx(untried[pos]);
         st.set_blocked_at(ci);
     }
     // Unwind this frame's blocks = exactly `untried[lo..hi]` (untouched:
@@ -602,6 +536,223 @@ fn grow<const SAT: bool, const VERTEX: bool>(
     for &nb in &untried[lo..hi] {
         st.unblock(nb); // BLOCKED → QUEUED
     }
+}
+
+/// One iteration of `grow`'s `for pos in lo..hi` loop body, extracted so
+/// the same body can be invoked both serially (from `grow`) and in
+/// parallel at the bucket root (from `grow_parallel_top`). Does **not**
+/// perform the loop's terminal `set_blocked_at(ci)` — the caller owns
+/// the blocked-set discipline (serial: set BLOCKED for later siblings;
+/// parallel top-of-bucket: BLOCKED for `untried[..pos]` is pre-marked
+/// in the cloned state before this call).
+///
+/// `hi` is this frame's frontier upper bound — the `untried.len()` at
+/// entry to the frame (not at entry to this iteration), so the
+/// append/truncate dance lands on the right boundary regardless of how
+/// many neighbours this iteration pushes.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn process_one_pos<const SAT: bool, const VERTEX: bool>(
+    n: u64,
+    seed: Cell,
+    xmax: i32,
+    st: &mut CellState,
+    weight: u64,
+    td: u32,
+    min_gap: i32,
+    pos: usize,
+    hi: usize,
+    untried: &mut Vec<Cell>,
+    total: &mut Count,
+) {
+    let c = untried[pos];
+    let ci = st.idx(c);
+    let w2 = weight + wedge_orbit_size_no_apex::<VERTEX>(c);
+    if w2 <= n {
+        // Lever #1: the 4-neighbour `CellState` index is `ci ± 1` /
+        // `ci ± stride` (an add). `stride` is fixed; `ci = idx(c)` reused.
+        let stride_i = st.stride as isize;
+        // tx ≡ 1 globally (seed on x-axis), so §4.1 reduces to `td`.
+        // SAT: ntd unused (folded away); 1 keeps the shared accept/
+        // dispatch expressions trivially true with no edge-class test.
+        let ntd = if SAT {
+            1
+        } else {
+            td + u32::from(on_diagonal_edge(c))
+        };
+        st.set_slice_at(ci);
+        if w2 == n {
+            // §4.1: connected by construction; x-axis is met at the seed,
+            // so only the diagonal touch (`td`) gates (unconditional SAT).
+            if SAT || ntd > 0 {
+                *total += 1;
+            }
+            // cannot extend further (weight would exceed n)
+        } else {
+            // Every prior branch truncated back to `hi`, so the buffer
+            // ends exactly at this level's suffix here.
+            debug_assert_eq!(untried.len(), hi);
+            // Append c's fresh neighbours after the suffix. The membership
+            // index is `ci + (dx*stride + dy)` (add, not multiply); only
+            // formed after the wedge/xmax/forbidden guards pass (so it is
+            // provably in-bounds and == `idx(nb)`, asserted in debug).
+            for (dx, dy) in NEIGHBOURS {
+                let nb = (c.0 + dx, c.1 + dy);
+                if in_wedge(nb) && nb.0 <= xmax && !forbidden(nb, seed.0) {
+                    let ni = ci.wrapping_add_signed(dx as isize * stride_i + dy as isize);
+                    debug_assert_eq!(ni, st.idx(nb));
+                    if st.is_free_at(ni) {
+                        st.set_queued_at(ni);
+                        untried.push(nb);
+                    }
+                }
+            }
+            if SAT || ntd > 0 {
+                // §4.1 satisfied (or already) — monotone, so the whole
+                // child subtree takes the SAT specialization. (On the SAT
+                // path this is the only arm; the else is folded out.)
+                if n - w2 == 4 {
+                    // R=4 tail-fold (DESIGN/FUTURE lever G). The SAT
+                    // child has remaining budget 4. Every cell is
+                    // weight ∈ {4,8} (the only weight-1 cell, the apex,
+                    // is the seed or forbidden, so never a fresh
+                    // frontier cell). A weight-4 cell completes
+                    // (`w2'==n`) and is accepted unconditionally (SAT);
+                    // a weight-8 cell overshoots (`w2'=n+4>n`) and is
+                    // skipped. Either way the child never recurses and
+                    // never appends to `untried`, and its `blocked`
+                    // inserts are fully self-unwound and never read
+                    // (no neighbour expansion). So the child's entire
+                    // contribution is exactly the number of weight-4
+                    // cells in its frontier `untried[pos+1..]` — fold
+                    // it inline, skipping the call + per-node frame and
+                    // the blocked/unwind bookkeeping. Provably
+                    // count-identical to the recursion.
+                    for &nb in &untried[pos + 1..] {
+                        if wedge_orbit_size_no_apex::<VERTEX>(nb) == 4 {
+                            *total += 1;
+                        }
+                    }
+                } else {
+                    grow::<true, VERTEX>(
+                        n,
+                        seed,
+                        xmax,
+                        st,
+                        w2,
+                        0,
+                        0,
+                        pos + 1,
+                        untried,
+                        total,
+                    );
+                }
+            } else {
+                grow::<false, VERTEX>(
+                    n,
+                    seed,
+                    xmax,
+                    st,
+                    w2,
+                    ntd,
+                    min_gap.min(c.0 - c.1),
+                    pos + 1,
+                    untried,
+                    total,
+                );
+            }
+            // Drop this branch's appended neighbours. They leave the
+            // buffer here ⇒ QUEUED → FREE (the unique "dequeue" site).
+            while untried.len() > hi {
+                let nb = untried.pop().unwrap();
+                st.dequeue(nb);
+            }
+        }
+        st.unset_slice_at(ci); // SLICE → QUEUED (c is still in the buffer)
+    }
+}
+
+/// Bucket-root parallel variant of [`grow`]: instead of looping over
+/// `for pos in 0..hi` serially, fan the top-level frontier out across
+/// rayon. Each task clones the bucket's `CellState` + `untried` template
+/// and runs that pos's subtree independently; results sum.
+///
+/// **Why this is byte-identical:** the only effect a serial-loop earlier
+/// iteration has on a later iteration's state is `set_blocked_at(ci)` for
+/// `untried[lo..pos]`. We pre-apply those BLOCKED transitions to the
+/// cloned state before calling [`process_one_pos`], so each parallel task
+/// sees *exactly* the state the equivalent serial iteration would see.
+/// Frontier neighbours pushed during the subtree are appended to the
+/// task's own cloned `untried`, then truncated on return — local to the
+/// task, never shared. `*total += 1` becomes a per-task local that the
+/// `.sum()` combines commutatively.
+///
+/// **Cost model.** Each top-level branch pays one `CellState::clone()`
+/// (`(xmax+1)² u8`s ≈ 11 KB at n=104, microseconds) plus an
+/// `untried.to_vec()` (≤4 cells). For the heaviest cell bucket (ax=3 at
+/// n=104, ~61 ms serial) this is ~50 ns per clone × ~2 frontier branches,
+/// negligible. For trivial buckets (ax near `n/8`, sub-ms) the clone is
+/// proportionally larger but still microseconds.
+///
+/// **Scope.** Used only at the bucket root (top-of-bucket fan-out, depth
+/// 0). Below this, recursion via [`grow`] is sequential. Called from
+/// [`run_bucket`] in place of the top-level `grow` call.
+#[allow(clippy::too_many_arguments)]
+fn grow_parallel_top<const SAT: bool, const VERTEX: bool>(
+    n: u64,
+    seed: Cell,
+    xmax: i32,
+    st_template: &CellState,
+    weight: u64,
+    td: u32,
+    min_gap: i32,
+    untried_template: &[Cell],
+) -> Count {
+    // Same prune as `grow`'s entry — pre-fan-out, so we don't pay any
+    // clone cost for a dead bucket.
+    if !SAT && weight + edge_reach_lb(td, min_gap) > n {
+        return 0;
+    }
+    let hi = untried_template.len();
+    (0..hi)
+        .into_par_iter()
+        .with_max_len(1) // one bucket-branch per task — sizes vary across
+        // the 1–4 frontier branches; let work-stealing balance.
+        .map(|pos| {
+            // Per-task clone: state + untried buffer.
+            let mut st = st_template.clone();
+            let mut untried: Vec<Cell> = untried_template.to_vec();
+            // Pre-apply the serial loop's left-of-pos effect: each earlier
+            // pos would have ended with `set_blocked_at(ci)` for its
+            // `untried[lo+i]` (QUEUED → BLOCKED). Reproduce that here so
+            // the cloned state matches what the serial code sees at
+            // iteration `pos`.
+            for &nb in &untried_template[..pos] {
+                let ci = st.idx(nb);
+                st.set_blocked_at(ci);
+            }
+            // Now run the single iteration. `hi` is fixed (the frame's
+            // entry-length); see [`process_one_pos`] doc.
+            let mut local: Count = 0;
+            process_one_pos::<SAT, VERTEX>(
+                n,
+                seed,
+                xmax,
+                &mut st,
+                weight,
+                td,
+                min_gap,
+                pos,
+                hi,
+                &mut untried,
+                &mut local,
+            );
+            local
+            // st and untried drop here — equivalent to the serial code's
+            // frame-exit BLOCKED→QUEUED unwind, since the cloned state is
+            // thrown away.
+        })
+        .sum()
 }
 
 /// `a(n)` for OEIS A142886: the number of polyominoes with `n` cells whose
@@ -674,10 +825,11 @@ pub fn count_parallel(n: usize) -> Count {
         // so adaptive chunking groups heavy cells together and badly
         // imbalances the pool. Force per-bucket granularity.
         .map(|(is_vertex, ax)| {
+            // `PARALLEL_TOP=true`: nested rayon for top-of-bucket fan-out.
             if is_vertex {
-                run_bucket::<true>(n_u64, ax, xmax)
+                run_bucket::<true, true>(n_u64, ax, xmax)
             } else {
-                run_bucket::<false>(n_u64, ax, xmax)
+                run_bucket::<true, false>(n_u64, ax, xmax)
             }
         })
         .sum()
@@ -838,7 +990,9 @@ mod tests {
             let mut last_count: Count = 0;
             for _ in 0..5 {
                 let t = Instant::now();
-                let c = run_bucket::<false>(n, ax, xmax);
+                // PARALLEL_TOP=false: per-bucket serial isolation (the
+                // measurement this diagnostic is for).
+                let c = run_bucket::<false, false>(n, ax, xmax);
                 let us = t.elapsed().as_micros();
                 if us < best_us {
                     best_us = us;
