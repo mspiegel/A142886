@@ -357,18 +357,57 @@ _No deferred work is currently parked._
       lever; not pursued here.
     - **Net cumulative speedup at n=104 (vs serial baseline):** single-
       call **7.74×**; --max-n 104 aggregate **~5.6×**.
+    - **Heaviest-bucket sample(1) profile — confirms the wall is the
+      algorithm, no parallel lever hiding.** Built tests with
+      `RUSTFLAGS="-C symbol-mangling-version=v0"` so monomorphizations
+      are distinct symbols, looped the heaviest single cell bucket
+      (ax=3 at n=104, serial, ~61 ms × 100 iters = ~6 s window),
+      sampled at 1 ms cadence. Findings:
+      - **Only two symbols appear** in samples: `grow::<false, false>`
+        (pre-§4.1) and `grow::<true, false>` (post-§4.1). Everything
+        else — `process_one_pos`, `CellState` ops, `wedge_orbit_size_no_apex`,
+        `edge_reach_lb`, `forbidden` — is inlined as `#[inline(always)]`
+        intended. No `RawVec::grow_one` beyond first-fill (<1 %).
+        No rayon/library hotspots (this is the serial path).
+      - **Hot-offset breakdown of `grow::<false, false>`** (function
+        start at +0; `bl <recursive>` at +1164, sampled return PC
+        +1168 = call-tree dominant, *not* self-time):
+        - `+208`: `cmp x0, x11; b.lo` = the `w2 <= n` budget check
+          (~14 % self).
+        - `+268`–`+728`: NEIGHBOURS unrolled (×4) — `in_wedge` /
+          `forbidden` / `is_free_at` / `set_queued_at` / `untried.push`
+          (~20 % self).
+        - `+880`–`+1020`: pre-recursive-call register save / stack-arg
+          shuffle (~25 % self) — *intrinsic* recursion overhead, 10
+          args spill 2 to stack on ARM64.
+        - `+1220`–`+1248`: `b.lo` landing pad + loop tail
+          (`pos++`, next iter) — ~14 % self.
+      - **No surprises.** The whole profile is in `grow`'s for-loop
+        body and recursive-call setup. Lever I (iterative DFS) already
+        tested this hypothesis (replace recursion with an explicit
+        stack) and was −19 % — the recursion is already optimal; per-
+        call overhead samples land where they do because of
+        spill/reload latency, not unnecessary work. Closed ledger.
+      - **Bottom line.** The 7.74× single-call wall is hot-loop-bound
+        in `grow` itself, no inflated overhead, no library hotspots.
+        No new *parallel* lever is hiding inside the heaviest sub-task.
+        Future wins past 7.74× need either (i) algorithmic change
+        (out of scope per the §4.5 / §4.7 floors), (ii) platform-
+        specific P-core affinity for the dominant sub-task, or
+        (iii) re-opened single-core inner-loop work (the lever B class
+        from FUTURE.md) — none of which is bucket-level parallelism.
+        Diagnostic test deleted (one-off; the v0-symbol + sample(1)
+        workflow is documented here for reproduction).
     - **Threshold sweep — measured, kept "every bucket" (∼3-5 % win not
       worth the n-dependent knob).** Question from the original plan
       ("apply subtree-parallel to every bucket, or only heavy ones?")
-      revisited with measurement. New `threshold_sweep_n104` diagnostic
-      (#[ignore]'d) dispatches each bucket task to `run_bucket::<true>`
-      vs `run_bucket::<false>` based on a heaviness predictor
-      `headroom = n − ws − edge_reach_lb(td, gap)`; cell ax≥1 and
-      vertex ax≥1 simplify to `headroom = n − 8·ax`. **T=0** = every
-      bucket parallel-top (currently shipped); **T=∞** = no subtree
-      parallel anywhere (= pre-lever-2 / lever-3-only shipped). Best-of-
-      15 × 3 runs at n=104 (best-of-5/3 runs initial; tightened where
-      signals were marginal):
+      revisited with a throwaway `threshold_sweep_n104` diagnostic that
+      dispatched each bucket to `run_bucket::<PARALLEL_TOP, V>` based on
+      a heaviness predictor `headroom = n − ws − edge_reach_lb(td, gap)`
+      (cell ax≥1 and vertex ax≥1 simplify to `headroom = n − 8·ax`).
+      **T=0** = every bucket parallel-top (currently shipped); **T=∞** =
+      no subtree parallel anywhere (= pre-lever-2 / lever-3-only
+      shipped). Best-of-15 × 3 runs at n=104:
 
       | T   | mean speedup vs T=0 | notes |
       |-----|--------------------:|-------|
@@ -389,11 +428,10 @@ _No deferred work is currently parked._
       n-dependent knob (`T` should scale with n — the candidate winners
       lie around `headroom ≈ n/3 .. n/4`, i.e. `ax ≤ (n-T)/8 ≈ n/8 .. 9`
       at n=104) for a payoff at the floor of what's measurable.
-      Defensible to revisit if and only if larger n shifts the
-      cost balance enough to push the signal clear of noise; diagnostic
-      retained for that. The "every bucket" choice in the lever-2 plan
-      was *slightly* suboptimal but the loss is single-digit-% within
-      noise band, not a tier-3-vs-tier-1 reversal.
+      Diagnostic test deleted; numbers preserved here. The "every
+      bucket" choice in the lever-2 plan was *slightly* suboptimal but
+      the loss is single-digit-% within noise band, not a tier-3-vs-
+      tier-1 reversal.
 
 ## Resolved / evaluated-and-rejected (do not re-propose)
 
