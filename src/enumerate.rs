@@ -532,8 +532,8 @@ fn grow<const SAT: bool, const VERTEX: bool>(
     }
     let hi = untried.len(); // this level's frontier is untried[lo..hi]
     for pos in lo..hi {
-        process_one_pos::<SAT, VERTEX>(
-            n, seed, xmax, st, weight, td, min_gap, pos, hi, untried, total,
+        process_one_pos::<SAT, VERTEX, false>(
+            n, seed, xmax, st, weight, td, min_gap, pos, hi, untried, total, 0,
         );
         // c is now excluded for this frame's later siblings. It was QUEUED
         // (a frontier cell still in the buffer, or just un-chosen above);
@@ -562,9 +562,16 @@ fn grow<const SAT: bool, const VERTEX: bool>(
 /// entry to the frame (not at entry to this iteration), so the
 /// append/truncate dance lands on the right boundary regardless of how
 /// many neighbours this iteration pushes.
+/// `PARALLEL_HERE = true` enables depth-1 fan-out: at the recursive `grow`
+/// call sites below, the child's frontier `untried[pos+1..untried.len()]`
+/// is fanned out across rayon (each sub-task clones state, mirrors serial's
+/// left-of-pos BLOCKED effect, then runs `process_one_pos<SAT, V, false>` —
+/// depth-2 stays serial). Only taken when invoked from a top-of-bucket
+/// sub-task (i.e. from `process_one_pos_cloned`). All callers from `grow`'s
+/// serial loop pass `false`, monomorphizing to today's exact path.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn process_one_pos<const SAT: bool, const VERTEX: bool>(
+fn process_one_pos<const SAT: bool, const VERTEX: bool, const PARALLEL_HERE: bool>(
     n: u64,
     seed: Cell,
     xmax: i32,
@@ -576,6 +583,7 @@ fn process_one_pos<const SAT: bool, const VERTEX: bool>(
     hi: usize,
     untried: &mut Vec<Cell>,
     total: &mut Count,
+    depth: u32,
 ) {
     let c = untried[pos];
     let ci = st.idx(c);
@@ -749,6 +757,26 @@ fn process_one_pos<const SAT: bool, const VERTEX: bool>(
                     }
 
                     *total += local_r8;
+                } else if PARALLEL_HERE
+                    && depth < D1_MAX_DEPTH
+                    && (untried.len().saturating_sub(pos + 1)) >= D1_MIN_WIDTH
+                    && (n - w2) >= D1_MIN_BUDGET
+                {
+                    // Recursive fan-out (SAT path). `st`/`untried` borrowed
+                    // as templates; sub-tasks clone, mirror serial's
+                    // pre-pos BLOCKED, run process_one_pos with depth+1.
+                    *total += grow_parallel_one_level::<true, VERTEX>(
+                        n,
+                        seed,
+                        xmax,
+                        &*st,
+                        w2,
+                        0,
+                        0,
+                        pos + 1,
+                        untried.as_slice(),
+                        depth + 1,
+                    );
                 } else {
                     grow::<true, VERTEX>(
                         n,
@@ -763,6 +791,24 @@ fn process_one_pos<const SAT: bool, const VERTEX: bool>(
                         total,
                     );
                 }
+            } else if PARALLEL_HERE
+                && depth < D1_MAX_DEPTH
+                && (untried.len().saturating_sub(pos + 1)) >= D1_MIN_WIDTH
+                && (n - w2) >= D1_MIN_BUDGET
+            {
+                // Recursive fan-out (unsat path).
+                *total += grow_parallel_one_level::<false, VERTEX>(
+                    n,
+                    seed,
+                    xmax,
+                    &*st,
+                    w2,
+                    ntd,
+                    min_gap.min(c.0 - c.1),
+                    pos + 1,
+                    untried.as_slice(),
+                    depth + 1,
+                );
             } else {
                 grow::<false, VERTEX>(
                     n,
@@ -820,7 +866,7 @@ fn process_one_pos_cloned<const SAT: bool, const VERTEX: bool>(
         st.set_blocked_at(ci);
     }
     let mut local: Count = 0;
-    process_one_pos::<SAT, VERTEX>(
+    process_one_pos::<SAT, VERTEX, true>(
         n,
         seed,
         xmax,
@@ -832,11 +878,138 @@ fn process_one_pos_cloned<const SAT: bool, const VERTEX: bool>(
         hi,
         &mut untried,
         &mut local,
+        0, // bucket-top sub-task: depth = 0
     );
     local
     // st and untried drop here — equivalent to the serial code's
     // frame-exit BLOCKED→QUEUED unwind, since the cloned state is
     // thrown away.
+}
+
+/// Depth-1 fan-out guards. Each sub-task pays one `CellState::clone`
+/// (~11 KB at n=104, 20 KB at n=140) + `untried.to_vec()`; below these
+/// thresholds the per-sub-task work is too small to amortize.
+const D1_MIN_WIDTH: usize = 2;
+const D1_MIN_BUDGET: u64 = 48;
+/// Maximum fan-out recursion depth. `depth = 0` is the bucket-top sub-task
+/// (created by `grow_parallel_top`); each subsequent
+/// `grow_parallel_one_level` increments. Bounds the sub-task tree size so
+/// clone overhead stays bounded even at large n. Closes the Amdahl tail
+/// observed at heavy-bucket end-of-run on M2 Pro.
+const D1_MAX_DEPTH: u32 = 4;
+
+/// Recursive binary fork-join over the index range `[lo..hi)`. Used for
+/// depth-1 fan-out where the child frontier can exceed 4 (so the hand-
+/// written `match hi { 0..=4 }` in [`grow_parallel_top`] doesn't fit).
+/// On a rayon worker thread, `rayon::join` takes its cheap path, so this
+/// is strictly less plumbing than `par_iter().with_max_len(1)` at modest
+/// widths.
+fn par_range<F>(lo: usize, hi: usize, f: &F) -> Count
+where
+    F: Fn(usize) -> Count + Sync,
+{
+    match hi.saturating_sub(lo) {
+        0 => 0,
+        1 => f(lo),
+        _ => {
+            let mid = lo + (hi - lo) / 2;
+            let (a, b) = rayon::join(|| par_range(lo, mid, f), || par_range(mid, hi, f));
+            a + b
+        }
+    }
+}
+
+/// One recursive-fan-out sub-task: clone the child's `CellState` + `untried`
+/// template, pre-apply BLOCKED for `untried[lo..sub_pos]` (mirroring serial
+/// grow's left-of-pos effect within the child frame), then run
+/// `process_one_pos<SAT, V, true>` for this sub_pos with the given `depth`.
+/// `PARALLEL_HERE=true` propagates the option to fan out further; the
+/// `depth < D1_MAX_DEPTH` gate in `process_one_pos` actually decides.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn process_one_pos_cloned_d1<const SAT: bool, const VERTEX: bool>(
+    sub_pos: usize,
+    lo: usize,
+    hi: usize,
+    n: u64,
+    seed: Cell,
+    xmax: i32,
+    st_template: &CellState,
+    weight: u64,
+    td: u32,
+    min_gap: i32,
+    untried_template: &[Cell],
+    depth: u32,
+) -> Count {
+    let mut st = st_template.clone();
+    let mut untried: Vec<Cell> = untried_template.to_vec();
+    for &nb in &untried_template[lo..sub_pos] {
+        let ci = st.idx(nb);
+        st.set_blocked_at(ci);
+    }
+    let mut local: Count = 0;
+    process_one_pos::<SAT, VERTEX, true>(
+        n,
+        seed,
+        xmax,
+        &mut st,
+        weight,
+        td,
+        min_gap,
+        sub_pos,
+        hi,
+        &mut untried,
+        &mut local,
+        depth,
+    );
+    local
+}
+
+/// Depth-1 parallel variant: instead of the child's `for pos in (lo..hi)`
+/// loop running serially under [`grow`], fan it out via [`par_range`].
+/// Mirrors [`grow_parallel_top`] but one level deeper (child of a top-of-
+/// bucket sub-task) and with arbitrary fan-out width — the child frontier
+/// is parent leftovers `untried[parent_pos+1..parent_hi]` plus c's ≤4 fresh
+/// neighbours, so typically 3-8 cells.
+///
+/// Called from [`process_one_pos`] when `PARALLEL_HERE && width >=
+/// D1_MIN_WIDTH && (n - w2) >= D1_MIN_BUDGET`. Below those thresholds the
+/// caller falls back to serial `grow`.
+#[allow(clippy::too_many_arguments)]
+fn grow_parallel_one_level<const SAT: bool, const VERTEX: bool>(
+    n: u64,
+    seed: Cell,
+    xmax: i32,
+    st_template: &CellState,
+    weight: u64,
+    td: u32,
+    min_gap: i32,
+    lo: usize,
+    untried_template: &[Cell],
+    depth: u32,
+) -> Count {
+    // Mirror grow's entry prune so a dead child doesn't pay any clone cost.
+    if !SAT && weight + edge_reach_lb(td, min_gap) > n {
+        return 0;
+    }
+    let hi = untried_template.len();
+    let p = |sub_pos: usize| -> Count {
+        process_one_pos_cloned_d1::<SAT, VERTEX>(
+            sub_pos,
+            lo,
+            hi,
+            n,
+            seed,
+            xmax,
+            st_template,
+            weight,
+            td,
+            min_gap,
+            untried_template,
+            depth,
+        )
+    };
+    par_range(lo, hi, &p)
 }
 
 /// Bucket-root parallel variant of [`grow`]: instead of looping over
