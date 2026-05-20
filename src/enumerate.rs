@@ -672,27 +672,87 @@ fn process_one_pos<const SAT: bool, const VERTEX: bool>(
     }
 }
 
+/// One top-of-bucket sub-task: clone the bucket's `CellState` + `untried`
+/// template, apply the BLOCKED transitions that the serial loop's earlier
+/// iterations would have left (`untried[..pos]` → BLOCKED), then run
+/// `process_one_pos` for this `pos`. Pulled out so [`grow_parallel_top`]
+/// can dispatch each pos via direct `rayon::join` instead of `par_iter`'s
+/// adaptive bridge plumbing (`bridge_producer_consumer::helper` etc.) —
+/// `par_iter` is overkill at hi ≤ 4 and `with_max_len(1)`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn process_one_pos_cloned<const SAT: bool, const VERTEX: bool>(
+    pos: usize,
+    hi: usize,
+    n: u64,
+    seed: Cell,
+    xmax: i32,
+    st_template: &CellState,
+    weight: u64,
+    td: u32,
+    min_gap: i32,
+    untried_template: &[Cell],
+) -> Count {
+    let mut st = st_template.clone();
+    let mut untried: Vec<Cell> = untried_template.to_vec();
+    // Reproduce the serial loop's left-of-pos effect: each earlier
+    // pos would have ended with `set_blocked_at(ci)` for its
+    // `untried[i]` (QUEUED → BLOCKED). So the cloned state matches what
+    // the serial code would see at iteration `pos`.
+    for &nb in &untried_template[..pos] {
+        let ci = st.idx(nb);
+        st.set_blocked_at(ci);
+    }
+    let mut local: Count = 0;
+    process_one_pos::<SAT, VERTEX>(
+        n,
+        seed,
+        xmax,
+        &mut st,
+        weight,
+        td,
+        min_gap,
+        pos,
+        hi,
+        &mut untried,
+        &mut local,
+    );
+    local
+    // st and untried drop here — equivalent to the serial code's
+    // frame-exit BLOCKED→QUEUED unwind, since the cloned state is
+    // thrown away.
+}
+
 /// Bucket-root parallel variant of [`grow`]: instead of looping over
-/// `for pos in 0..hi` serially, fan the top-level frontier out across
-/// rayon. Each task clones the bucket's `CellState` + `untried` template
-/// and runs that pos's subtree independently; results sum.
+/// `for pos in 0..hi` serially, fan the top-level frontier branches out
+/// across rayon. Each branch clones the bucket's `CellState` + `untried`
+/// template and runs that pos's subtree independently; results sum.
 ///
 /// **Why this is byte-identical:** the only effect a serial-loop earlier
 /// iteration has on a later iteration's state is `set_blocked_at(ci)` for
-/// `untried[lo..pos]`. We pre-apply those BLOCKED transitions to the
-/// cloned state before calling [`process_one_pos`], so each parallel task
-/// sees *exactly* the state the equivalent serial iteration would see.
-/// Frontier neighbours pushed during the subtree are appended to the
-/// task's own cloned `untried`, then truncated on return — local to the
-/// task, never shared. `*total += 1` becomes a per-task local that the
-/// `.sum()` combines commutatively.
+/// `untried[lo..pos]`. [`process_one_pos_cloned`] pre-applies those
+/// BLOCKED transitions to its own state clone before running, so each
+/// parallel branch sees *exactly* the state the equivalent serial
+/// iteration would see. Frontier neighbours pushed during the subtree
+/// are appended to the task's own cloned `untried`, then truncated on
+/// return — local to the task, never shared. `*total += 1` becomes a
+/// per-task local that summation combines commutatively.
+///
+/// **Why direct `rayon::join` over `par_iter`.** The seed's frontier has
+/// `hi ≤ 4` cells (4-neighbour expansion, minus out-of-wedge and
+/// `forbidden`); typically 2 for heavy buckets. `par_iter` with
+/// `with_max_len(1)` over a tiny range still drags the adaptive
+/// `bridge_producer_consumer::helper` machinery through every dispatch.
+/// We're already on a rayon worker thread here (this is called from a
+/// bucket task that's itself a rayon job), so `rayon::join` takes its
+/// cheap worker-thread path — strictly less machinery than `par_iter`
+/// for the small `hi` we have. (The prior measurement that "join is
+/// 3.4× slower" applied only to `join` invoked from the main thread —
+/// see `count_parallel`'s docstring.)
 ///
 /// **Cost model.** Each top-level branch pays one `CellState::clone()`
-/// (`(xmax+1)² u8`s ≈ 11 KB at n=104, microseconds) plus an
-/// `untried.to_vec()` (≤4 cells). For the heaviest cell bucket (ax=3 at
-/// n=104, ~61 ms serial) this is ~50 ns per clone × ~2 frontier branches,
-/// negligible. For trivial buckets (ax near `n/8`, sub-ms) the clone is
-/// proportionally larger but still microseconds.
+/// (`(xmax+1)² u8` ≈ 11 KB at n=104, profiled at <1 % of total worker
+/// time — empirically invisible) plus an `untried.to_vec()` (≤4 cells).
 ///
 /// **Scope.** Used only at the bucket root (top-of-bucket fan-out, depth
 /// 0). Below this, recursion via [`grow`] is sequential. Called from
@@ -714,45 +774,57 @@ fn grow_parallel_top<const SAT: bool, const VERTEX: bool>(
         return 0;
     }
     let hi = untried_template.len();
-    (0..hi)
-        .into_par_iter()
-        .with_max_len(1) // one bucket-branch per task — sizes vary across
-        // the 1–4 frontier branches; let work-stealing balance.
-        .map(|pos| {
-            // Per-task clone: state + untried buffer.
-            let mut st = st_template.clone();
-            let mut untried: Vec<Cell> = untried_template.to_vec();
-            // Pre-apply the serial loop's left-of-pos effect: each earlier
-            // pos would have ended with `set_blocked_at(ci)` for its
-            // `untried[lo+i]` (QUEUED → BLOCKED). Reproduce that here so
-            // the cloned state matches what the serial code sees at
-            // iteration `pos`.
-            for &nb in &untried_template[..pos] {
-                let ci = st.idx(nb);
-                st.set_blocked_at(ci);
-            }
-            // Now run the single iteration. `hi` is fixed (the frame's
-            // entry-length); see [`process_one_pos`] doc.
-            let mut local: Count = 0;
-            process_one_pos::<SAT, VERTEX>(
-                n,
-                seed,
-                xmax,
-                &mut st,
-                weight,
-                td,
-                min_gap,
-                pos,
-                hi,
-                &mut untried,
-                &mut local,
+    // Closure that processes one pos. `process_one_pos_cloned` captures
+    // its references via the closure's by-ref captures (all immutable);
+    // the closure itself is `Copy + Send + Sync`.
+    let p = |pos: usize| -> Count {
+        process_one_pos_cloned::<SAT, VERTEX>(
+            pos,
+            hi,
+            n,
+            seed,
+            xmax,
+            st_template,
+            weight,
+            td,
+            min_gap,
+            untried_template,
+        )
+    };
+    // hi is bounded by 4 (max neighbours of seed minus out-of-wedge and
+    // `forbidden`). Hand-write the rayon::join nesting per branch count
+    // — no par_iter plumbing, just direct binary fork-join.
+    match hi {
+        0 => 0,
+        1 => p(0),
+        2 => {
+            let (a, b) = rayon::join(|| p(0), || p(1));
+            a + b
+        }
+        3 => {
+            // Right-heavy split: pos=0 alone, (pos=1 || pos=2) on the
+            // other side. Branches are uneven anyway (Redelmeier
+            // exclusion makes later branches smaller), so a perfectly
+            // balanced split doesn't exist; rayon's work-stealer
+            // handles any residual imbalance.
+            let (a, bc) = rayon::join(
+                || p(0),
+                || {
+                    let (b, c) = rayon::join(|| p(1), || p(2));
+                    b + c
+                },
             );
-            local
-            // st and untried drop here — equivalent to the serial code's
-            // frame-exit BLOCKED→QUEUED unwind, since the cloned state is
-            // thrown away.
-        })
-        .sum()
+            a + bc
+        }
+        4 => {
+            let ((a, b), (c, d)) = rayon::join(
+                || rayon::join(|| p(0), || p(1)),
+                || rayon::join(|| p(2), || p(3)),
+            );
+            a + b + c + d
+        }
+        _ => unreachable!("frontier has at most 4 wedge cells"),
+    }
 }
 
 /// `a(n)` for OEIS A142886: the number of polyominoes with `n` cells whose

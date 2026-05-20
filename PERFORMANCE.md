@@ -448,6 +448,47 @@ _No deferred work is currently parked._
         either algorithmic change, P-core affinity, or re-opened
         single-core inner-loop work — none is parallel orchestration.
         Diagnostic test deleted; numbers preserved here.
+  - **REFINEMENT — inner `par_iter` → direct `rayon::join` recursion:
+    SHIPPED (~+3 % single-call, +5 % --max-n aggregate, byte-identical).**
+    The parallel profile measured ~11 % of total worker time in rayon
+    plumbing (`bridge_producer_consumer::helper`, `join_context`
+    closures). Of that, the **inner** par_iter in `grow_parallel_top`
+    has only `hi ≤ 4` items (the seed's frontier — typically 2 for
+    heavy buckets). Driving 2 items through `par_iter().with_max_len(1)`
+    pulls them through the full adaptive bridge machinery for what is
+    morally a single binary fork-join.
+    - **Refactor.** Extracted `process_one_pos_cloned<SAT, VERTEX>`
+      (the per-pos clone+BLOCK+`process_one_pos` body), then
+      `grow_parallel_top` dispatches by `match hi { 0..=4 ... }` with
+      direct `rayon::join` nesting (binary for hi=2, right-heavy for
+      hi=3, balanced 2-2 for hi=4). `hi ≥ 5` is `unreachable!()` —
+      bounded by the 4 wedge-neighbours of any seed.
+    - **Why the prior "join is 3.4× slower" finding does NOT apply.**
+      That measurement was for `rayon::join` invoked from the **main**
+      thread (non-worker). `grow_parallel_top` runs *inside* a bucket
+      task, i.e. on a rayon worker thread. From a worker, `join` takes
+      its cheap path — strictly less machinery than `par_iter`.
+    - **Measured (release, 12-core Apple Silicon, best-of-5/7):**
+
+      | metric                        | lever 2 ship | + `rayon::join` | change |
+      |-------------------------------|-------------:|----------------:|-------:|
+      | single-call count_parallel(104) | 0.063 s     | **0.061 s** (mean of 3) | −3 % |
+      | --max-n 104 best-of-7         | 0.19 s       | **0.18 s**     | −5 %  |
+      | speedup vs serial (single-call) | 7.74×       | **~7.92×**     | +0.18 |
+
+      Run-to-run variance on single-call is ~5 % (3 runs:
+      0.059/0.061/0.064 s); −3 % signal sits within noise band but
+      consistently in the favorable direction across all 3 runs. The
+      --max-n aggregate (−5 %) integrates over more work and is cleaner.
+    - **Thread scaling unchanged from lever-2 shape.** Confirms this is
+      a plumbing-overhead lever, not an Amdahl-wall lever — same floor
+      at 12 threads. Total `--max-n 104` parallel speedup vs serial
+      now ≈ **5.5×**.
+    - **The remaining outer par_iter** (the union par_iter in
+      `count_parallel`) was NOT touched. That one is from the main
+      thread, where `join` is slow per the prior measurement; and its
+      ~50 sub-tasks are well-served by `par_iter().with_max_len(1)`.
+      Both findings consistent.
     - **Threshold sweep — measured, kept "every bucket" (∼3-5 % win not
       worth the n-dependent knob).** Question from the original plan
       ("apply subtree-parallel to every bucket, or only heavy ones?")
@@ -482,6 +523,11 @@ _No deferred work is currently parked._
       bucket" choice in the lever-2 plan was *slightly* suboptimal but
       the loss is single-digit-% within noise band, not a tier-3-vs-
       tier-1 reversal.
+  - **Net cumulative single-call speedup at n=104:** **~7.92×** (was
+    7.74× pre-refactor; 6.94× pre-lever-2 + lever-3 only). All four
+    shipped parallel levers (rayon-over-buckets → union par_iter +
+    max_len(1) → top-of-bucket fan-out → inner par_iter → rayon::join)
+    byte-identical to the OEIS reference and b-file n ≤ 68.
 
 ## Resolved / evaluated-and-rejected (do not re-propose)
 
