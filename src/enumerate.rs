@@ -645,6 +645,110 @@ fn process_one_pos<const SAT: bool, const VERTEX: bool>(
                             *total += 1;
                         }
                     }
+                } else if n - w2 == 8 {
+                    // R=8 inline fold (lever G extension). The SAT child
+                    // has remaining budget 8. Each candidate `c2 ∈
+                    // untried[pos+1..hi8]` is either:
+                    //   CASE A (interior, weight 8) — completes alone
+                    //          (`w2 + 8 == n`). Contribution: +1.
+                    //   CASE B (boundary, weight 4 — on x-axis y=0 or
+                    //          diagonal y=x) — needs a 2nd weight-4
+                    //          cell. The R=4 sub-recursion (lever G)
+                    //          counts weight-4 cells in c2's frontier
+                    //          = (c2's siblings still QUEUED in
+                    //          `untried[k+1..hi8]`) + (c2's fresh
+                    //          neighbours that are FREE and weight-4).
+                    //
+                    // **Zero state mutation.** Unlike the recursive
+                    // `grow::<true>(R=8)` which sets SLICE / pushes
+                    // neighbours / BLOCKs / unwinds, the inline form
+                    // just counts. c2's QUEUED state already excludes
+                    // it from later iterations' `is_free_at` neighbour
+                    // checks (any non-FREE state excludes), so we never
+                    // need to BLOCK c2. Shared neighbours (a cell that
+                    // is both in `untried[k+1..hi8]` and one of c2's
+                    // 4-neighbours) get counted once as a sibling and
+                    // are rejected by `is_free_at` in the neighbour
+                    // loop — no double counting. Multi-pair (a cell
+                    // that is a neighbour of two different weight-4
+                    // c2's) gets counted twice — matches the recursion;
+                    // `slice ∪ {c2, n}` and `slice ∪ {c2', n}` are
+                    // distinct slices, both valid completions.
+                    let mut local_r8: Count = 0;
+                    let hi8 = untried.len();
+                    for k in (pos + 1)..hi8 {
+                        let c2 = untried[k];
+                        let w2_cell = wedge_orbit_size_no_apex::<VERTEX>(c2);
+                        if w2_cell == 8 {
+                            // CASE A — interior cell completes alone.
+                            local_r8 += 1;
+                        } else {
+                            debug_assert_eq!(w2_cell, 4);
+                            // CASE B — boundary cell needs a 2nd weight-4 cell.
+                            // (i) Siblings in c's R=8 frontier (still QUEUED).
+                            for &nb in &untried[k + 1..hi8] {
+                                if wedge_orbit_size_no_apex::<VERTEX>(nb) == 4 {
+                                    local_r8 += 1;
+                                }
+                            }
+                            // (ii) c2's fresh neighbours that pass guards,
+                            // are FREE in CellState, and have weight 4.
+                            let c2_idx = st.idx(c2);
+                            for (dx, dy) in NEIGHBOURS {
+                                let nb = (c2.0 + dx, c2.1 + dy);
+                                if in_wedge(nb)
+                                    && nb.0 <= xmax
+                                    && !forbidden(nb, seed.0)
+                                {
+                                    let ni = c2_idx.wrapping_add_signed(
+                                        dx as isize * stride_i + dy as isize,
+                                    );
+                                    if st.is_free_at(ni)
+                                        && wedge_orbit_size_no_apex::<VERTEX>(nb) == 4
+                                    {
+                                        local_r8 += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // (T2) Debug-build self-check: invoke the recursive
+                    // `grow::<true>(R=8)` path with a local counter and
+                    // assert it agrees with the inline result. Catches
+                    // any inline-vs-recursive divergence at the exact
+                    // call site in any debug build. Free in release.
+                    // Both paths leave CellState and untried *unchanged*
+                    // on return (the recursive path's mutations are all
+                    // unwound at frame exit), so calling both
+                    // sequentially is safe — we just need to give the
+                    // recursive call its own counter to avoid double-
+                    // crediting `*total`.
+                    #[cfg(debug_assertions)]
+                    {
+                        let mut recursive_total: Count = 0;
+                        grow::<true, VERTEX>(
+                            n,
+                            seed,
+                            xmax,
+                            st,
+                            w2,
+                            0,
+                            0,
+                            pos + 1,
+                            untried,
+                            &mut recursive_total,
+                        );
+                        debug_assert_eq!(
+                            local_r8, recursive_total,
+                            "R=8 inline mismatch: inline={local_r8} != \
+                             recursive={recursive_total} \
+                             (n={n}, w2={w2}, pos={pos}, hi8={hi8}, \
+                              VERTEX={VERTEX}, SAT={SAT})"
+                        );
+                    }
+
+                    *total += local_r8;
                 } else {
                     grow::<true, VERTEX>(
                         n,
@@ -1038,6 +1142,56 @@ mod tests {
     fn matches_oeis_prefix_full() {
         for (n, &expected) in REFERENCE.iter().enumerate() {
             assert_eq!(count(n), expected, "a({n}) mismatch");
+        }
+    }
+
+    /// (T1) Explicit per-n assertions at small `n` where the R=8 tail-fold
+    /// (lever G extension) fires multiple times across the bucket recursion.
+    /// This duplicates coverage that `matches_oeis_prefix_full` already
+    /// provides, but the test name flags the lever — any future R=8
+    /// regression surfaces here with a clear diagnostic.
+    ///
+    /// Targets `n % 4 == 0` and `n ≥ 12` (the smallest n where R=8 actually
+    /// triggers — slices reaching `w2 = n - 8 ≥ 4` must exist for any R=8
+    /// call site to fire). Asserts three things per n:
+    ///   (a) `count(n) == REFERENCE[n]` (OEIS oracle on cell + vertex);
+    ///   (b) `count_cell_centered(n) + count_vertex_centered(n) == count(n)`
+    ///       (per-center split is consistent — catches an R=8 bug that
+    ///       affected only one center);
+    ///   (c) parallel agreement: `count_parallel(n) == count(n)` (R=8 inline
+    ///       on the parallel path also matches; catches a bug in only one
+    ///       PARALLEL_TOP monomorphization).
+    #[test]
+    fn r8_inline_explicit_reference_small_n() {
+        // Small n's where R=8 fires repeatedly through the bucket recursion.
+        // n=12: a(12)=3, smallest non-trivial n with `n - w2 == 8` reachable
+        //   inside the recursion (e.g., apex + 3 cells of weight 4).
+        // n=16..=40 step 4: a sweep through the small-but-nontrivial range.
+        for &n in &[12usize, 16, 20, 24, 28, 32, 36, 40] {
+            let cell = count_cell_centered(n);
+            let vertex = count_vertex_centered(n);
+            let both = count(n);
+            let both_par = count_parallel(n);
+            let reference = REFERENCE[n];
+            assert_eq!(
+                both, reference,
+                "(T1) count(n={n}) = {both} != REFERENCE[{n}] = {reference}"
+            );
+            assert_eq!(
+                cell + vertex,
+                both,
+                "(T1) per-center split at n={n}: cell={cell} + vertex={vertex} != both={both}"
+            );
+            assert_eq!(
+                both_par, both,
+                "(T1) parallel mismatch at n={n}: count_parallel={both_par} != count={both}"
+            );
+            if n % 4 != 0 {
+                assert_eq!(
+                    vertex, 0,
+                    "(T1) vertex must be 0 for n={n} (n%4 != 0)"
+                );
+            }
         }
     }
 

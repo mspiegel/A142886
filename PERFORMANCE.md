@@ -839,10 +839,62 @@ _No deferred work is currently parked._
       untouched. Recursion-overhead amortization, *not* algorithmic: the
       expensive neighbour-expansion (82% at `R≥12`) is untouched and the
       R≤8 frontier work is relocated, not removed — a B-class constant
-      factor that stacks with B/I, not a growth-class change. The R=8
-      extension (cum. 74.4% of nodes, but only 18.3% of child-spawns +
-      the rare connected-weight-4-pair correctness burden) remains a
-      smaller, riskier follow-on, not done.
+      factor that stacks with B/I, not a growth-class change.
+      - **R=8 extension — SHIPPED (~2 % serial, ~3-5 % parallel,
+        byte-identical).** Lever G's R=4 case extended one budget tier
+        up to R=8. The user's framing — split `c2 ∈ untried[pos+1..hi8]`
+        into **interior (weight 8)** vs **boundary (weight 4 — y=0 or
+        y=x)** — collapses the "connected-weight-4-pair correctness
+        burden" into a clean case-split with **zero state mutation**:
+        - CASE A (interior, weight 8): c2 alone completes the slice
+          (`w2 + 8 == n`). Contribution `+1`.
+        - CASE B (boundary, weight 4): the inline R=4 sub-recursion
+          counts weight-4 cells in c2's frontier — reproduced by
+          (i) iterating c2's siblings in `untried[k+1..hi8]` (still
+          QUEUED, count weight-4) plus (ii) inspecting c2's 4 cardinal
+          neighbours directly (filtered by `in_wedge`, `xmax`,
+          `forbidden`, `is_free_at`, then weight-4).
+        **No SLICE/BLOCK transitions, no push, no truncate.** c2's
+        QUEUED state already excludes it from later iterations'
+        `is_free_at` neighbour checks (any non-FREE state excludes), so
+        the existing `set_blocked_at(c2)` is unnecessary. Shared
+        neighbours (a cell that is both a sibling and one of c2's
+        4-neighbours) are counted once (as a sibling) and rejected by
+        `is_free_at` in the neighbour loop — no double-counting.
+        Multi-pair counting (cell `n` as a neighbour of two different
+        weight-4 c2 / c2') is *correct* — `slice ∪ {c2, n}` and
+        `slice ∪ {c2', n}` are distinct slices, both valid completions.
+        **Correctness (defense in depth):**
+          - (T1) `r8_inline_explicit_reference_small_n`: always-on
+            test asserting `count(n) == REFERENCE[n]`, per-center
+            split, and parallel-vs-serial agreement at n ∈
+            {12, 16, ..., 40}.
+          - (T2) Embedded `#[cfg(debug_assertions)]` self-check at the
+            R=8 inline site: every R=8 firing in every debug-build test
+            invokes the recursive `grow::<true>(R=8)` with a separate
+            counter and `debug_assert_eq!`s inline-vs-recursive. Catches
+            divergence at the exact call site at zero release cost.
+            `cargo test` (debug) ran ~12 tests including the deep
+            OEIS-reference sweeps; zero mismatches found.
+          - `--max-n 120` serial vs pre-change `diff`-clean;
+            `--parallel --verify` all-match vs `REFERENCE` and
+            `b142886.txt` n ≤ 68; cargo clippy `-D warnings` clean.
+        **Measured (release, n=104, 12-core Apple Silicon):**
+
+          | metric                              | shipped | + R=8 inline | change |
+          |-------------------------------------|--------:|-------------:|-------:|
+          | cell single-call serial (mean of 3) | 0.410 s | **0.404 s** | −1.5 % |
+          | both single-call serial (mean)      | 0.467 s | **0.458 s** | −1.9 % |
+          | both single-call parallel (mean)    | 0.061 s | **0.059 s** | −3.3 % |
+          | --max-n 104 serial best-of-7        | 0.98 s  | **0.96 s** | −2 % |
+          | --max-n 104 --parallel best-of-7    | 0.18 s  | **0.17 s** | −5.5 % |
+
+        Hits the lower end of the predicted 3-5 % range on serial,
+        upper end on parallel. R=8 nodes are ~24 % of post-§4.1 ≈ ~11 %
+        of grow time; eliminating the recursive call frame for those
+        invocations saves the call-prologue/epilogue + arg-shuffle but
+        leaves the per-node arithmetic (which dominates) untouched —
+        consistent with the magnitudes observed.
     - **(I) Recursion → explicit-stack iterative DFS — measured, NO-GO
       (~19% *slower*).** Hypothesis: an explicit work-stack removes
       per-node call prologue/epilogue / frame setup. **Stage 1** built:
