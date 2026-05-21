@@ -23,5 +23,5 @@ pub type Count = u64;
 
 pub use enumerate::{
     count, count_cell_centered, count_cell_centered_parallel, count_parallel,
-    count_parallel_sharded, count_vertex_centered, count_vertex_centered_parallel,
+    count_vertex_centered, count_vertex_centered_parallel,
 };
