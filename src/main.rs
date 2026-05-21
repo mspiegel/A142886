@@ -7,7 +7,10 @@ use a142886::{
     count, count_cell_centered, count_cell_centered_parallel, count_parallel,
     count_parallel_sharded, count_vertex_centered, count_vertex_centered_parallel, Count,
 };
-use std::path::Path;
+use std::collections::HashSet;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,11 @@ struct Args {
     pools: usize,
     /// Threads per pool when `pools > 0`. 0 = auto (num_cpus / pools).
     pool_size: usize,
+    /// Per-term checkpoint file. On startup, parses existing `n a(n)`
+    /// lines and skips them. Each newly computed term is appended +
+    /// fsync'd so a kill / SIGTERM / spot preemption loses at most one
+    /// in-flight term. None = no checkpointing.
+    checkpoint: Option<PathBuf>,
 }
 
 const HELP: &str = "\
@@ -67,6 +75,11 @@ OPTIONS:
                               Requires --parallel and --center both. K=1 is
                               a no-regression test mode.
     --pool-size M             threads per pool (default num_cpus / K).
+    --checkpoint FILE         per-term checkpoint: at startup, read FILE and
+                              skip any n already present (echoed to stdout for
+                              continuity); each new `n a(n)` is appended +
+                              fsync'd so a kill loses at most the in-flight
+                              term. Resume by re-running with the same flag.
     -h, --help                show this help
 
 NOTE: cost grows steeply with N (see DESIGN.md §7 baseline-runtime note).";
@@ -78,6 +91,7 @@ fn parse_args() -> Result<Args, String> {
     let mut parallel = false;
     let mut pools: usize = 0;
     let mut pool_size: usize = 0;
+    let mut checkpoint: Option<PathBuf> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -117,6 +131,10 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--pool-size must be >= 1".into());
                 }
             }
+            "--checkpoint" => {
+                let v = it.next().ok_or("--checkpoint requires a path")?;
+                checkpoint = Some(PathBuf::from(v));
+            }
             "-h" | "--help" => {
                 println!("{HELP}");
                 std::process::exit(0);
@@ -148,14 +166,66 @@ fn parse_args() -> Result<Args, String> {
         parallel,
         pools,
         pool_size,
+        checkpoint,
     })
 }
 
-/// Print `n a(n)` for n = 0..=max_n using the selected center.
+/// Print `n a(n)` for n = 0..=max_n using the selected center. When
+/// `--checkpoint FILE` is set, also resumes from / appends to FILE.
 fn print_table(args: &Args) {
     let term = term_fn(args);
+
+    // Load any already-computed terms from the checkpoint file; echo them
+    // to stdout so the full sequence is visible regardless of resume.
+    let (mut already_done, mut ckpt_file) = if let Some(path) = &args.checkpoint {
+        let mut done: HashSet<usize> = HashSet::new();
+        if path.exists() {
+            let contents = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!("--checkpoint: cannot read {}: {e}", path.display())
+            });
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let n_str = line.split_whitespace().next().unwrap_or("");
+                if let Ok(n) = n_str.parse::<usize>() {
+                    done.insert(n);
+                    println!("{line}");
+                }
+            }
+        }
+        let f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|e| {
+                panic!("--checkpoint: cannot open {} for append: {e}", path.display())
+            });
+        (done, Some(f))
+    } else {
+        (HashSet::new(), None)
+    };
+
     for n in 0..=args.max_n {
-        println!("{n} {}", term(n));
+        if already_done.contains(&n) {
+            continue;
+        }
+        let val = term(n);
+        println!("{n} {val}");
+        if let Some(ref mut f) = ckpt_file {
+            // Append + fsync per term so a kill / SIGTERM / preemption
+            // loses at most the in-flight term. Per-term I/O cost is
+            // ~µs (single ~30-byte append + fsync), negligible vs the
+            // seconds-to-days per-term compute at large n.
+            writeln!(f, "{n} {val}").unwrap_or_else(|e| {
+                panic!("--checkpoint: write at n={n} failed: {e}")
+            });
+            f.sync_all().unwrap_or_else(|e| {
+                panic!("--checkpoint: fsync at n={n} failed: {e}")
+            });
+            already_done.insert(n);
+        }
     }
 }
 
