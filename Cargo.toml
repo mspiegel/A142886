@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 # Data-parallel enumeration over independent x-axis buckets. Runtime-gated
 # by the `--parallel` CLI flag (one binary times serial vs parallel).
 rayon = "1"
+# Wall-clock timestamps on stdout `n a(n)` lines. Local time, no extra
+# features needed beyond the default clock.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [lib]
 name = "a142886"

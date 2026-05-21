@@ -7,6 +7,7 @@ use a142886::{
     count, count_cell_centered, count_cell_centered_parallel, count_parallel,
     count_vertex_centered, count_vertex_centered_parallel, Count,
 };
+use chrono::Local;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -120,8 +121,18 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// Print `n a(n)` for n = 0..=max_n using the selected center. When
-/// `--checkpoint FILE` is set, also resumes from / appends to FILE.
+/// Wall-clock timestamp for stdout lines. Local time, `YYYY-MM-DD HH:MM:SS`.
+fn now_stamp() -> String {
+    Local::now().format("[%Y-%m-%d %H:%M:%S]").to_string()
+}
+
+/// Print `n a(n)` for n = 0..=max_n using the selected center. Each stdout
+/// line is prefixed with `[YYYY-MM-DD HH:MM:SS]` (local time at the moment
+/// of printing — for echoed-from-checkpoint lines, the time of the resume,
+/// not the original compute). When `--checkpoint FILE` is set, also
+/// resumes from / appends to FILE. The checkpoint file itself stays in
+/// plain `n a(n)` format (no timestamps) so it remains parseable on
+/// resume and matches the b-file format.
 fn print_table(args: &Args) {
     let term = args.center.term(args.parallel);
 
@@ -141,7 +152,7 @@ fn print_table(args: &Args) {
                 let n_str = line.split_whitespace().next().unwrap_or("");
                 if let Ok(n) = n_str.parse::<usize>() {
                     done.insert(n);
-                    println!("{line}");
+                    println!("{} {line}", now_stamp());
                 }
             }
         }
@@ -162,12 +173,14 @@ fn print_table(args: &Args) {
             continue;
         }
         let val = term(n);
-        println!("{n} {val}");
+        println!("{} {n} {val}", now_stamp());
         if let Some(ref mut f) = ckpt_file {
             // Append + fsync per term so a kill / SIGTERM / preemption
             // loses at most the in-flight term. Per-term I/O cost is
             // ~µs (single ~30-byte append + fsync), negligible vs the
-            // seconds-to-days per-term compute at large n.
+            // seconds-to-days per-term compute at large n. File format
+            // stays plain `n a(n)` (no timestamp) — preserves parseability
+            // on resume and matches the b-file format.
             writeln!(f, "{n} {val}").unwrap_or_else(|e| {
                 panic!("--checkpoint: write at n={n} failed: {e}")
             });
