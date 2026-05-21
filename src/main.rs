@@ -136,6 +136,21 @@ fn now_stamp() -> String {
 fn print_table(args: &Args) {
     let term = args.center.term(args.parallel);
 
+    // Header: invocation + start time + column legend. `#`-prefixed so
+    // `awk '!/^#/'` or `grep -v '^#'` skips them. Re-emitted per
+    // invocation, which makes resume boundaries visible in the log.
+    let argv: Vec<String> = std::env::args().collect();
+    println!(
+        "# a142886 v{} {}",
+        env!("CARGO_PKG_VERSION"),
+        argv[1..].join(" ")
+    );
+    println!(
+        "# started {} local",
+        Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    println!("# columns: [timestamp] n a(n)");
+
     // Load any already-computed terms from the checkpoint file; echo them
     // to stdout so the full sequence is visible regardless of resume.
     let (mut already_done, mut ckpt_file) = if let Some(path) = &args.checkpoint {
