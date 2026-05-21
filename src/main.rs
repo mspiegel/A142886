@@ -5,7 +5,7 @@
 use a142886::verify::{parse_bfile, REFERENCE};
 use a142886::{
     count, count_cell_centered, count_cell_centered_parallel, count_parallel,
-    count_vertex_centered, count_vertex_centered_parallel, Count,
+    count_parallel_sharded, count_vertex_centered, count_vertex_centered_parallel, Count,
 };
 use std::path::Path;
 use std::process::ExitCode;
@@ -37,6 +37,11 @@ struct Args {
     center: Center,
     verify: bool,
     parallel: bool,
+    /// 0 = use existing `count_parallel` path (no sharding). >0 = use
+    /// `count_parallel_sharded(n, pools, pool_size)`.
+    pools: usize,
+    /// Threads per pool when `pools > 0`. 0 = auto (num_cpus / pools).
+    pool_size: usize,
 }
 
 const HELP: &str = "\
@@ -44,6 +49,7 @@ a142886 — enumerate OEIS A142886 (polyominoes with full D8 symmetry)
 
 USAGE:
     a142886 [--max-n N] [--center cell|vertex|both] [--verify] [--parallel]
+            [--pools K [--pool-size M]]
 
 OPTIONS:
     --max-n N                 print n a(n) for n = 0..=N (default 0)
@@ -54,6 +60,13 @@ OPTIONS:
                               cell + vertex run concurrently via rayon::join.
                               Byte-identical counts; control thread count via
                               RAYON_NUM_THREADS.
+    --pools K                 use count_parallel_sharded(n, K, pool_size):
+                              K independent rayon pools, byte-identical to
+                              --parallel. Bypasses the per-pool Amdahl ceiling
+                              (~30x) on machines with significantly more cores.
+                              Requires --parallel and --center both. K=1 is
+                              a no-regression test mode.
+    --pool-size M             threads per pool (default num_cpus / K).
     -h, --help                show this help
 
 NOTE: cost grows steeply with N (see DESIGN.md §7 baseline-runtime note).";
@@ -63,6 +76,8 @@ fn parse_args() -> Result<Args, String> {
     let mut center = Center::Both;
     let mut verify = false;
     let mut parallel = false;
+    let mut pools: usize = 0;
+    let mut pool_size: usize = 0;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -84,6 +99,24 @@ fn parse_args() -> Result<Args, String> {
             }
             "--verify" => verify = true,
             "--parallel" => parallel = true,
+            "--pools" => {
+                let v = it.next().ok_or("--pools requires a value")?;
+                pools = v
+                    .parse()
+                    .map_err(|_| format!("invalid --pools value: {v:?}"))?;
+                if pools < 1 {
+                    return Err("--pools must be >= 1".into());
+                }
+            }
+            "--pool-size" => {
+                let v = it.next().ok_or("--pool-size requires a value")?;
+                pool_size = v
+                    .parse()
+                    .map_err(|_| format!("invalid --pool-size value: {v:?}"))?;
+                if pool_size < 1 {
+                    return Err("--pool-size must be >= 1".into());
+                }
+            }
             "-h" | "--help" => {
                 println!("{HELP}");
                 std::process::exit(0);
@@ -92,19 +125,51 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
+    if pools > 0 {
+        if !parallel {
+            return Err("--pools requires --parallel".into());
+        }
+        if center != Center::Both {
+            return Err("--pools requires --center both".into());
+        }
+        if pool_size == 0 {
+            // Auto-size: divide available threads across pools.
+            let ncpu = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            pool_size = (ncpu / pools).max(1);
+        }
+    }
+
     Ok(Args {
         max_n,
         center,
         verify,
         parallel,
+        pools,
+        pool_size,
     })
 }
 
 /// Print `n a(n)` for n = 0..=max_n using the selected center.
 fn print_table(args: &Args) {
-    let term = args.center.term(args.parallel);
+    let term = term_fn(args);
     for n in 0..=args.max_n {
         println!("{n} {}", term(n));
+    }
+}
+
+/// Resolve the `n -> a(n)` callable for this run. Sharded path engages
+/// only when `--pools` is set; otherwise the existing `Center::term`
+/// dispatch is unchanged (no behavior change for default users).
+fn term_fn(args: &Args) -> Box<dyn Fn(usize) -> Count> {
+    if args.pools > 0 {
+        let k = args.pools;
+        let m = args.pool_size;
+        Box::new(move |n| count_parallel_sharded(n, k, m))
+    } else {
+        let f = args.center.term(args.parallel);
+        Box::new(move |n| f(n))
     }
 }
 
@@ -114,9 +179,9 @@ fn print_table(args: &Args) {
 /// correctness gate for the parallel enumerator (the reference vector is
 /// the independently-verified OEIS oracle).
 fn run_verify(args: &Args) -> usize {
-    // `--verify` ignores `--center` (always sums both) — pick the right
-    // total-count fn based on `--parallel`.
-    let term: fn(usize) -> Count = if args.parallel { count_parallel } else { count };
+    // `--verify` ignores `--center` (always sums both) — use the same
+    // term resolution as the table path so --pools is honored here too.
+    let term = term_fn(args);
     // Cap at the reference's range and keep the default fast. The parens
     // matter: `.min` must apply to the whole if-expression, not the `else`.
     let upto = (if args.max_n > 0 { args.max_n } else { 40 }).min(REFERENCE.len() - 1);
