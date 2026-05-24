@@ -422,9 +422,11 @@ exceeds `n`, so the subtree holds no countable slice and the cut is sound —
 independently of any descendant's bound. Non-monotonicity only affects *how
 early* a doomed subtree is cut (performance), never correctness.
 
-**Measured effect of §4.6 (release, cumulative `--max-n`).** The speedup
-grows with `n` (the prune lowers the effective branching, not just a constant
-factor); numbers for the original lex-min-seed §4.2 enumerator:
+**Measured effect of §4.6 (release, cumulative `--max-n`, single-thread,
+pre-`const SAT` / R=4 / R=8 tail-fold / depth-1 fan-out baseline; later
+levers tracked in PERFORMANCE.md).** The speedup grows with `n` (the
+prune lowers the effective branching, not just a constant factor); numbers
+for the original lex-min-seed §4.2 enumerator:
 
 | n  | §4.2 (un-pruned) | with §4.6 | speedup |
 |----|------------------|-----------|---------|
@@ -438,9 +440,10 @@ wedge enumeration is still exponential (§4.5), so this lowers the constant and
 pushes the reachable `n` out without changing the growth class.
 
 **Minimal-x-axis-cell bucketing vs the prior lex-min-seed scheme (both with
-§4.6, release, cumulative `--max-n`, best of 3).** Switching the §4.2
-enumeration scheme (see §4.2 "Why bucket by the minimal x-axis cell") is a
-further ≈2×, with a *non-eroding* ratio and byte-identical counts:
+§4.6, release, cumulative `--max-n`, best of 3; same single-thread,
+pre-tail-fold baseline as above).** Switching the §4.2 enumeration scheme
+(see §4.2 "Why bucket by the minimal x-axis cell") is a further ≈2×, with
+a *non-eroding* ratio and byte-identical counts:
 
 | n   | lex-min seed | x-axis bucket | ratio |
 |-----|--------------|---------------|-------|
@@ -453,10 +456,11 @@ The full `0..=68` `--ignored` regression sweep is well under 0.1 s. Still
 exponential (§4.5) — a constant-factor win, not a growth-class change.
 
 **Joint cell-budget + gap diagonal term vs the prior `4·min_gap` term (both
-on the x-axis-bucket scheme, release, cumulative `--max-n`, best of 3).**
-Tightening the diagonal term from `4·min_gap` to `8·min_gap − 4` is a
-further ≈1.33×, ratio non-eroding, counts byte-identical (n ≤ 100 vs the
-prior engine; n ≤ 68 vs b-file / `REFERENCE`):
+on the x-axis-bucket scheme, release, cumulative `--max-n`, best of 3;
+same single-thread, pre-tail-fold baseline as above).** Tightening the
+diagonal term from `4·min_gap` to `8·min_gap − 4` is a further ≈1.33×,
+ratio non-eroding, counts byte-identical (n ≤ 100 vs the prior engine;
+n ≤ 68 vs b-file / `REFERENCE`):
 
 | n   | `4·min_gap` | joint `8·min_gap−4` | ratio |
 |-----|-------------|---------------------|-------|
@@ -500,6 +504,34 @@ regions), not from a transfer matrix on A142886's own wedge. The split was
 a pure `git mv`, reverted cleanly; numbers recorded in PERFORMANCE.md. This
 confirms the closed-ledger conclusion: more terms = more compute, not a
 transfer-matrix algorithm swap.
+
+### 4.8 Additional shipped levers (count-preserving)
+
+Three engine-level levers ship on top of the §4.6 prunes. Each is
+byte-identical to the §4.2/§4.6 baseline across the verification range;
+performance deltas are tracked in PERFORMANCE.md.
+
+- **`const SAT` two-phase recursion.** The §4.1 connectivity predicate has
+  two parts; the x-axis touch is met at every bucket root (`tx ≡ 1`), so
+  only the diagonal touch (`td`) gates. `td` is monotone: once a diagonal
+  cell enters the slice it never leaves, so the §4.6(b) `edge_reach_lb`
+  prune is provably inert thereafter. The recursion is specialized on a
+  `const SAT: bool` flag so the "post-diagonal" phase (`SAT = true`) is
+  compiled with no `td`/`min_gap` upkeep and no LB check — one source,
+  two monomorphized loops.
+- **R=4 and R=8 inline tail-folds (lever G / G-ext).** Near the leaves
+  (`weight + 4 == n` or `weight + 8 == n`) the recursion is unrolled into
+  an inline count of completions over the immediate frontier rather than
+  a full recursive descent. The R=8 fold cross-checks itself against the
+  recursive path in a debug-build assertion (`R=8 inline mismatch:
+  inline=… != recursive=…`).
+- **Depth-1 recursive rayon fan-out.** Inside each top-level bucket the
+  enumerator fans out again at recursion depths up to `D1_MAX_DEPTH = 4`
+  whenever the remaining width and weight budget exceed
+  `D1_MIN_WIDTH = 2` and `D1_MIN_BUDGET = 48`. This unbottlenecks the few
+  large buckets on a many-core box. A reverted multi-rayon-pool experiment
+  (commit `b3c8bb8`) confirmed the depth-1 fan-out alone is sufficient at
+  32-core scale.
 
 ## 5. Rust implementation sketch
 
@@ -548,6 +580,11 @@ A142886/
   - `count_parallel`, `count_cell_centered_parallel`,
     `count_vertex_centered_parallel` — byte-identical rayon-parallel
     siblings called by `--parallel`.
+- Release profile (`Cargo.toml [profile.release]`): `lto = true`,
+  `codegen-units = 1`, `panic = "abort"`. A panic in a pure batch
+  enumerator is a bug, not a recoverable condition, so dropping unwind
+  tables and landing pads frees the optimizer from preserving unwind
+  state across the bounds-check and allocation sites in the recursion.
 
 ## 6. CLI behaviour
 

@@ -32,16 +32,16 @@ symmetry) as far as feasible, verified against the OEIS b-file
 *Design ref: §5, §6.* Files: `Cargo.toml`, `src/main.rs`, `src/symmetry.rs`,
 `src/enumerate.rs`, `src/connectivity.rs`, `src/verify.rs`.
 
-- [ ] `Cargo.toml`: package name `a142886`, edition 2021; `rayon` as an
+- [x] `Cargo.toml`: package name `a142886`, edition 2021; `rayon` as an
       unconditional dependency (parallelism is gated by the runtime
       `--parallel` CLI flag, not by a Cargo feature); dev-deps as needed.
-- [ ] `src/` skeleton with the five modules; declare `mod` tree in `main.rs`
+- [x] `src/` skeleton with the five modules; declare `mod` tree in `main.rs`
       (or `lib.rs` + thin `main.rs` so tests can call the library).
-- [ ] `pub type Count = u64;` and the public API signatures from §5 as
+- [x] `pub type Count = u64;` and the public API signatures from §5 as
       `todo!()` stubs: `count`, `count_cell_centered`, `count_vertex_centered`.
-- [ ] CLI argument parsing stub: `--max-n N`, `--center cell|vertex|both`
+- [x] CLI argument parsing stub: `--max-n N`, `--center cell|vertex|both`
       (default `both`), `--verify`.
-- [ ] `#[cfg(test)] mod tests` harness compiling (empty).
+- [x] `#[cfg(test)] mod tests` harness compiling (empty).
 
 **Acceptance:** `cargo build` and `cargo test` (no tests) both succeed.
 
@@ -49,12 +49,12 @@ symmetry) as far as feasible, verified against the OEIS b-file
 
 *Design ref: §2, §3.1, §3.2, §7(e).* File: `src/symmetry.rs`.
 
-- [ ] The 8 transforms as the closed-form maps from the §2 table
+- [x] The 8 transforms as the closed-form maps from the §2 table
       (`e, r, r², r³, s, sr, sr², sr³`).
-- [ ] Cell-centered: `orbit_cell((x,y))`, `representative_in_W` with the
+- [x] Cell-centered: `orbit_cell((x,y))`, `representative_in_W` with the
       wedge-edge tie-break, and an orbit-size classifier returning
       1 (apex) / 4 (x-axis or diagonal edge) / 8 (interior) per §3.1.
-- [ ] Vertex-centered: orbit + representative + classifier per §3.2
+- [x] Vertex-centered: orbit + representative + classifier per §3.2
       (diagonal cells `(i,i)` → size 4; others → size 8; 2×2 core cell).
 
 **Acceptance:** test **(e)** `group_axioms_and_orbit_sizes` passes; orbit
@@ -64,12 +64,12 @@ sizes equal the §3.1 / §3.2 tables for sampled apex/edge/interior cells.
 
 *Design ref: §4.1, §4.3, §7(f).* File: `src/connectivity.rs`.
 
-- [ ] `slice_is_connected_polyomino(S) -> bool` = **(i)** `S` is one
+- [x] `slice_is_connected_polyomino(S) -> bool` = **(i)** `S` is one
       4-connected component (BFS or union–find over the wedge cells) **and**
       **(ii)** `S` has an occupied cell on the x-axis edge *and* one on the
       diagonal edge (apex / 2×2-core cell satisfies both alone). This is the
       §4.1 lemma; the only acceptance test on the hot path.
-- [ ] Debug-only `reconstruct_then_bfs(S)`: `⋃_{g∈D₈} g·S`, assert
+- [x] Debug-only `reconstruct_then_bfs(S)`: `⋃_{g∈D₈} g·S`, assert
       `|P| == expected_n`, BFS connectivity — gated behind
       `debug_assertions` / used only from tests, never the counting loop.
 
@@ -152,12 +152,16 @@ correct table; `cargo run -- --verify` reports all-match on the prefix.
       skip, not fail. The §4.6 prunes brought their cost down enough that
       `#[ignore]` was lifted; the only remaining `#[ignore]` tests are the
       per-bucket / per-call timing diagnostics in `src/enumerate.rs`.
-- [x] Measured release timing: pre-§4.6 n=60 ≈2.1 s, n=64 ≈4.0 s, n=68
-      ≈10 s; post-§4.6 n=68 ≈0.11 s. Switching §4.2 to minimal-x-axis-cell
-      bucketing is a further ≈2×, and the §4.6(b) joint cell-budget+gap
-      diagonal term a further ≈1.33× (n=100 → ≈0.9 s, ratios non-eroding;
-      DESIGN §4.6 tables); the full `0..=68` deep `--ignored` sweep is now
-      well under 0.1 s.
+- [x] Measured release timing (single-thread baseline, pre-`const SAT` /
+      R=4 / R=8 tail-fold / depth-1 fan-out): pre-§4.6 n=60 ≈2.1 s, n=64
+      ≈4.0 s, n=68 ≈10 s; post-§4.6 n=68 ≈0.11 s. Switching §4.2 to
+      minimal-x-axis-cell bucketing is a further ≈2×, and the §4.6(b)
+      joint cell-budget+gap diagonal term a further ≈1.33× (n=100 ≈0.9 s,
+      ratios non-eroding; DESIGN §4.6 tables); the full `0..=68` deep
+      sweep is now well under 0.1 s. The shipped engine adds further
+      `const SAT` two-phase specialization, R=4 / R=8 tail-folds, and a
+      depth-1 recursive rayon fan-out on `--parallel`; those numbers are
+      tracked in PERFORMANCE.md rather than here.
 
 **Achieved depth:** `count(n) == a(n)` verified for **n = 0..=68** against
 both the OEIS b-file and the embedded `REFERENCE`, zero mismatches. `u64`
@@ -238,6 +242,13 @@ brute-force agreement test (f) gates everything downstream.
   not an algorithm swap.
 - **`u64` sufficiency.** Argued in DESIGN §5; the `Count` alias is the escape
   hatch to `num-bigint` with no call-site churn.
+- **Multi-rayon-pool sharding tried and reverted.** A multi-pool variant
+  (`--pools` / `--pool-size`, `count_parallel_sharded`) was added under the
+  hypothesis that it would bypass an apparent per-pool ~30× Amdahl ceiling
+  at 32-core scale (commit `3200403`). Measured at scale it offered no win
+  over the depth-1 rayon fan-out and was reverted (commit `b3c8bb8`,
+  byte-identical at K=1, within noise on M2 Pro). Logged here so the
+  experiment is not repeated without new data.
 - **No design drift.** Any change to the algorithm, orbit arithmetic, or the
   connectivity criterion is a DESIGN.md change first, then reflected here —
   PLAN.md must not diverge from DESIGN.md.
