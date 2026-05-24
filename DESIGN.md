@@ -452,7 +452,8 @@ a *non-eroding* ratio and byte-identical counts:
 | 100 | 2.72 s       | 1.33 s        | 0.49  |
 | 104 | 5.29 s       | 2.61 s        | 0.49  |
 
-The full `0..=68` `--ignored` regression sweep is well under 0.1 s. Still
+The full `0..=68` regression sweep (now always-on under default
+`cargo test --release`) is well under 0.1 s. Still
 exponential (§4.5) — a constant-factor win, not a growth-class change.
 
 **Joint cell-budget + gap diagonal term vs the prior `4·min_gap` term (both
@@ -556,10 +557,12 @@ A142886/
   `HashSet<(i32,i32)>` keyed to `W` is retained only in `connectivity.rs`,
   which is the reconstruction-and-BFS oracle used by tests, never by the
   counting loop.
-- Connectivity: §4.1 slice predicate — `is_connected_wedge_slice` over the
-  ≈ n/8 occupied wedge cells plus the two edge-touch flags. Reconstruction
-  (the 8 closed-form maps from §2) is exposed as `reconstruct_then_bfs` for
-  the test-only oracle in `connectivity.rs`.
+- Connectivity: §4.1 slice predicate — `slice_is_connected_polyomino` over
+  the ≈ n/8 occupied wedge cells plus the two edge-touch flags.
+  Reconstruction (the 8 closed-form maps from §2) is exposed as
+  `reconstruct` (returns the rebuilt set) and `reconstruct_then_bfs`
+  (rebuilds and asserts connectivity by BFS) for the test-only oracle in
+  `connectivity.rs`.
 - Term magnitude: values stay well within `u64` for n ≤ 163 (growth is
   far slower than the ~4.06ⁿ of all polyominoes); expose the count type as a
   single alias so a big-integer backend (`num-bigint`) can be swapped in if
@@ -626,7 +629,7 @@ print microsecond profiles rather than asserting on counts.
 > (release: n=68 from ≈10 s to ≈0.1 s), switching the §4.2 scheme to
 > minimal-x-axis-cell bucketing is a further ≈2×, and the §4.6(b) joint
 > cell-budget+gap diagonal term a further ≈1.33× (n=100 ≈0.9 s; the full
-> `0..=68` `--ignored` sweep well under 0.1 s) — still exponential, just a
+> full `0..=68` sweep well under 0.1 s) — still exponential, just a
 > much lower branching factor. The
 > *always-on* `cargo test` reference-vector check now covers the full
 > embedded prefix `0..=68` (both `matches_oeis_prefix_to_40` and
@@ -779,7 +782,8 @@ fn matches_bfile() {
 ```
 
 Status (M5): verified — `count(n) == a(n)` for **n = 0..=68** against both
-the OEIS b-file and `REFERENCE`, zero mismatches (release `--ignored` ≈0.2 s
+the OEIS b-file and `REFERENCE`, zero mismatches (default
+`cargo test --release` ≈0.2 s
 after §4.6). Deeper `n` is bounded only by the exponential enumeration
 (§4.5).
 

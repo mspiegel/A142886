@@ -107,11 +107,13 @@ and the §4.1 edge-condition cases (`{(3,1)}`, `{(2,1),(3,1)}`,
 
 **Acceptance:** tests **(b)** named shapes, **(c)** zero-pattern, **(d)**
 split-formula pass; the §3.4 hand cases n = 1,4,5,8,9 reproduce
-(`a(9)=2` is the decisive arithmetic-plus-connectivity check). Plus an
-always-on `matches_oeis_prefix_to_40` early correctness check. Per the
-DESIGN.md §7 baseline-runtime note, always-on heavy `n ≡ 0,1 (mod 4)` checks
-are bounded at **n ≤ 40** (`HEAVY_BOUND`); the full `0..=68` prefix and the
-b-file are the on-demand deep checks in M5.
+(`a(9)=2` is the decisive arithmetic-plus-connectivity check). Plus
+always-on `matches_oeis_prefix_to_40` and (after §4.6 made it cheap)
+`matches_oeis_prefix_full` (0..=68) early correctness checks. Per the
+DESIGN.md §7 baseline-runtime note, only the **split-formula** (test (d))
+keeps its `n ≤ 40` `HEAVY_BOUND` on the heavy `n ≡ 0,1 (mod 4)` per-`n`
+calls; the full prefix and the b-file regression now both run under
+default `cargo test`.
 
 ## Milestone M4 — Verification & CLI
 
@@ -124,7 +126,9 @@ b-file are the on-demand deep checks in M5.
 - [x] `parse_bfile(path)` → `Vec<(usize, Count)>` (comment/blank-tolerant)
       with a fast unit test.
 - [x] `--verify`: compare `count()` to the embedded vector, and to
-      `b142886.txt` if present in CWD; clear pass/fail summary + exit code.
+      `b142886.txt` if present in the working directory (the crate root
+      when invoked via `cargo test` / `cargo run`); clear pass/fail
+      summary + exit code.
 - [x] Finish CLI: `--max-n` prints `n a(n)` (center-aware via `Center::term`);
       `--center cell|vertex|both`; `-h/--help`; bad args → help + exit 1.
 - [x] CLI extensions shipped with the optimized enumerator: `--parallel`
