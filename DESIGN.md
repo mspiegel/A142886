@@ -509,42 +509,78 @@ Crate layout (the crate itself is a follow-up; this document is the design):
 A142886/
   Cargo.toml
   src/
-    main.rs          # CLI: --max-n N, --center cell|vertex|both, --verify
+    lib.rs           # module tree + Count alias + public re-exports
+    main.rs          # CLI: --max-n, --center, --verify, --parallel, --checkpoint
     symmetry.rs      # the 8 transforms; orbit + representative logic
-    enumerate.rs     # Redelmeier growth per center type
-    connectivity.rs  # §4.1 slice predicate; reconstruct+BFS (debug only)
+    enumerate.rs     # Redelmeier growth per center type (incl. parallel paths)
+    connectivity.rs  # §4.1 slice predicate; reconstruct+BFS (oracle, tests only)
     verify.rs        # reference vector + optional b-file comparison
 ```
 
-- Cell coordinates: `(i32, i32)`. Wedge occupancy: a `HashSet<(i32,i32)>`
-  (or a packed bitset once a bounding box is fixed) keyed to `W`.
-- Connectivity: §4.1 slice predicate — BFS/union–find over the ≈ n/8
-  occupied wedge cells plus the two edge-touch flags. Reconstruction (the 8
-  closed-form maps from §2) is compiled only into the debug assertion.
+- Cell coordinates: `(i32, i32)`. The enumeration hot path stores wedge
+  occupancy in a flat `Vec<u8>` four-state byte grid (`CellState` in
+  `enumerate.rs`, states `FREE` / `QUEUED` / `SLICE` / `BLOCKED`) indexed
+  `(x · stride + y)` with `stride = xmax + 1`. The earlier sketch of
+  `HashSet<(i32,i32)>` keyed to `W` is retained only in `connectivity.rs`,
+  which is the reconstruction-and-BFS oracle used by tests, never by the
+  counting loop.
+- Connectivity: §4.1 slice predicate — `is_connected_wedge_slice` over the
+  ≈ n/8 occupied wedge cells plus the two edge-touch flags. Reconstruction
+  (the 8 closed-form maps from §2) is exposed as `reconstruct_then_bfs` for
+  the test-only oracle in `connectivity.rs`.
 - Term magnitude: values stay well within `u64` for n ≤ 163 (growth is
   far slower than the ~4.06ⁿ of all polyominoes); expose the count type as a
   single alias so a big-integer backend (`num-bigint`) can be swapped in if
   ever needed.
-- Parallelism: independent recursion subtrees parallelize cleanly with
-  `rayon` (optional, behind a feature flag).
-- Public API the tests below assume:
+- Parallelism: `rayon` is an **unconditional** dependency (no Cargo
+  feature); the parallel paths are gated by the runtime `--parallel` CLI
+  flag (and by direct calls to the `_parallel` library entry points). The
+  parallel design has two levels: a bucket-level `par_iter` over the
+  independent x-axis buckets, with the cell- and vertex-centered totals
+  joined concurrently via `rayon::join`; and a depth-1 recursive fan-out
+  inside each top bucket (`D1_MAX_DEPTH = 4`, `D1_MIN_BUDGET = 48`) so a
+  few large buckets do not bottleneck a many-core box. Counts are
+  byte-identical to the serial path; thread count is `RAYON_NUM_THREADS`.
+- Public API the tests below assume (re-exported from `lib.rs`):
   - `count(n: usize) -> u64` — `a(n)` (sum of both center types).
   - `count_cell_centered(n: usize) -> u64` — A351127-type contribution.
   - `count_vertex_centered(n: usize) -> u64` — A346800-type contribution.
+  - `count_parallel`, `count_cell_centered_parallel`,
+    `count_vertex_centered_parallel` — byte-identical rayon-parallel
+    siblings called by `--parallel`.
 
 ## 6. CLI behaviour
 
-- `a142886 --max-n 40` prints `n a(n)` for n = 0..40.
+- `a142886 --max-n 40` prints `n a(n)` for n = 0..40. Output begins with
+  three `#`-prefixed header lines (invocation, start time, column legend),
+  and every numeric line is prefixed with a `[YYYY-MM-DD HH:MM:SS]`
+  local-time stamp. The `#` headers make `awk '!/^#/'` (or `grep -v ^#`)
+  yield a clean numeric stream.
 - `--center cell|vertex|both` restricts/selects the enumeration (for
   cross-checking against A351127 / A346800 individually).
 - `--verify` compares output against the embedded reference vector (§7a),
-  and against `b142886.txt` if present in the working directory.
+  and against `b142886.txt` if present in the working directory. Ignores
+  `--center` (always sums both); respects `--parallel`, so
+  `--parallel --verify` is the correctness gate for the parallel enumerator.
+- `--parallel` runs the rayon paths (bucket-level over x-axis buckets +
+  depth-1 fan-out + cell/vertex `rayon::join`; see §5). Counts are
+  byte-identical to the serial path. Thread count is `RAYON_NUM_THREADS`.
+- `--checkpoint FILE` enables per-term restart safety for long runs. On
+  startup the file is parsed and every `n` already present is skipped
+  (and echoed to stdout for continuity); each newly computed term is
+  appended and fsynced before moving on, so a kill / SIGTERM / spot
+  preemption loses at most the in-flight term. The file stays in plain
+  `n a(n)` format (no timestamps) so it remains parseable on resume and
+  matches the b-file format.
 
 ## 7. Verification & unit tests
 
-Embed the following as `#[cfg(test)] mod tests` in the crate.
-`cargo test` runs (a)–(f); `cargo test -- --ignored` runs the b-file
-regression (g).
+Embed the following as `#[cfg(test)] mod tests` in the crate. Default
+`cargo test` runs (a)–(g): the §4.6 prunes made the full-prefix (a-deep)
+and b-file (g) checks cheap enough (well under a second on release) that
+`#[ignore]` was lifted from both. The only `#[ignore]` tests remaining
+are the per-bucket / per-call timing diagnostics in `enumerate.rs`, which
+print microsecond profiles rather than asserting on counts.
 
 > **Baseline runtime note (measured, M3; updated for §4.6).** The §4.2
 > enumerator visits all connected wedge slices of weight ≤ n, growing
@@ -555,16 +591,20 @@ regression (g).
 > cell-budget+gap diagonal term a further ≈1.33× (n=100 ≈0.9 s; the full
 > `0..=68` `--ignored` sweep well under 0.1 s) — still exponential, just a
 > much lower branching factor. The
-> *always-on* `cargo test` checks of the heavy `n ≡ 0,1 (mod 4)` cases remain
-> bounded at **n ≤ 40** (constant `HEAVY_BOUND`) and the reference-vector
-> always-on tier at `0..=40`; after §4.6 this is a comfortable safety margin
-> (it absorbs the slower debug build and any future regression) rather than a
-> tight ceiling. The cheap `n ≡ 2,3 (mod 4)` zero cases still cover the full
-> `0..120`; the full `0..=68` and the b-file `0..=163` stay the on-demand
-> `#[ignore]` deep checks ((a-deep)/(g), milestone M5). The enumeration stays
-> exponential (§4.5); reachable depth is empirical, not a fixed target. These
-> bounds are a runtime accommodation only — the algorithm is unchanged and
-> counts are byte-identical.
+> *always-on* `cargo test` reference-vector check now covers the full
+> embedded prefix `0..=68` (both `matches_oeis_prefix_to_40` and
+> `matches_oeis_prefix_full` run under default `cargo test`); after §4.6
+> the full-prefix run is well under 0.1 s on release. The b-file
+> regression `matches_bfile` (DEEP_BOUND = 68) is likewise always-on. The
+> split-formula consistency check (test (d)) keeps `HEAVY_BOUND = 40` on
+> its heavy `n ≡ 0,1 (mod 4)` per-`n` calls — that bound absorbs the
+> slower debug build and any future regression rather than being a tight
+> ceiling. The cheap `n ≡ 2,3 (mod 4)` zero cases still cover the full
+> `0..120`. The remaining `#[ignore]` tests are the per-bucket / per-call
+> timing diagnostics, not correctness checks. The enumeration stays
+> exponential (§4.5); reachable depth is empirical, not a fixed target.
+> These bounds are a runtime accommodation only — the algorithm is
+> unchanged and counts are byte-identical.
 
 **(a) Reference-vector test — known prefix.** The OEIS prefix
 (`n = 0..=68`) is the oracle. Per the baseline-runtime note it is checked in
@@ -584,7 +624,7 @@ fn matches_oeis_prefix_to_40() {
     }
 }
 
-#[test] #[ignore] // on-demand deep check (M5): cargo test -- --ignored
+#[test] // always-on after §4.6: full prefix runs in <0.1 s on release
 fn matches_oeis_prefix_full() {
     for n in 0..A142886.len() {
         assert_eq!(count(n), A142886[n], "a({n}) mismatch");
@@ -682,15 +722,14 @@ fn slice_predicate_edge_conditions() {
 }
 ```
 
-**(g) b-file regression (ignored by default).** Cross-checks `count(n)`
+**(g) b-file regression (always-on after §4.6).** Cross-checks `count(n)`
 against the authoritative OEIS b-file *and* the embedded `REFERENCE`, bounded
 at `DEEP_BOUND` (the baseline-runtime note: the literal `0..=163` is
 infeasible — the enumeration is exponential, §4.5). Absent data is a skip,
-not a failure.
+not a failure. Runs under default `cargo test --release`.
 
 ```rust
 #[test]
-#[ignore] // cargo test --release -- --ignored matches_bfile
 fn matches_bfile() {
     let path = Path::new("b142886.txt"); // crate root; not fetched by the crate
     if !path.exists() { eprintln!("skip: b142886.txt absent"); return; }

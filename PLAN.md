@@ -15,8 +15,12 @@ symmetry) as far as feasible, verified against the OEIS b-file
 - Count type alias `pub type Count = u64;` everywhere a term value flows; a
   big-integer backend (`num-bigint`) is a single-line swap if ever needed
   (DESIGN §5 argues `u64` suffices through n = 163).
-- Lattice cells are `(i32, i32)`; wedge occupancy is a `HashSet<(i32,i32)>`
-  (packed bitset is a later optimization, not a correctness concern).
+- Lattice cells are `(i32, i32)`. The enumeration hot path stores wedge
+  occupancy as a flat `Vec<u8>` four-state byte grid (`CellState` in
+  `src/enumerate.rs`, states `FREE` / `QUEUED` / `SLICE` / `BLOCKED`) indexed
+  `(x · stride + y)` with `stride = xmax + 1`. The `HashSet<Cell>`
+  representation survives only in `src/connectivity.rs`, which is the
+  reconstruction oracle used by tests, never by the counting loop.
 - Errors via `anyhow` in `main`/`verify`; library code returns `Result` or
   panics only in tests.
 - Each milestone must leave the tree `cargo fmt`-clean, `cargo clippy`-clean
@@ -28,8 +32,9 @@ symmetry) as far as feasible, verified against the OEIS b-file
 *Design ref: §5, §6.* Files: `Cargo.toml`, `src/main.rs`, `src/symmetry.rs`,
 `src/enumerate.rs`, `src/connectivity.rs`, `src/verify.rs`.
 
-- [ ] `Cargo.toml`: package name `a142886`, edition 2021; `[features]
-      parallel = ["rayon"]` with `rayon` optional; dev-deps as needed.
+- [ ] `Cargo.toml`: package name `a142886`, edition 2021; `rayon` as an
+      unconditional dependency (parallelism is gated by the runtime
+      `--parallel` CLI flag, not by a Cargo feature); dev-deps as needed.
 - [ ] `src/` skeleton with the five modules; declare `mod` tree in `main.rs`
       (or `lib.rs` + thin `main.rs` so tests can call the library).
 - [ ] `pub type Count = u64;` and the public API signatures from §5 as
@@ -113,14 +118,24 @@ b-file are the on-demand deep checks in M5.
 *Design ref: §6, §7(a).* Files: `src/verify.rs`, `src/main.rs`.
 
 - [x] Embed the 69-term reference vector (§7a, `verify::REFERENCE`, single
-      source of truth); always-on `matches_oeis_prefix_to_40` plus
-      `#[ignore]`d `matches_oeis_prefix_full` (0..=68) deep check.
+      source of truth); both `matches_oeis_prefix_to_40` and
+      `matches_oeis_prefix_full` (0..=68) are always-on default-`cargo test`
+      checks — the §4.6 prunes cut the full-prefix run to well under 0.1 s.
 - [x] `parse_bfile(path)` → `Vec<(usize, Count)>` (comment/blank-tolerant)
       with a fast unit test.
 - [x] `--verify`: compare `count()` to the embedded vector, and to
       `b142886.txt` if present in CWD; clear pass/fail summary + exit code.
 - [x] Finish CLI: `--max-n` prints `n a(n)` (center-aware via `Center::term`);
       `--center cell|vertex|both`; `-h/--help`; bad args → help + exit 1.
+- [x] CLI extensions shipped with the optimized enumerator: `--parallel`
+      runs bucket-level rayon over the x-axis buckets with cell- and
+      vertex-centered totals joined via `rayon::join` (`RAYON_NUM_THREADS`
+      bounds the pool); `--checkpoint FILE` parses any existing `n a(n)`
+      lines, echoes them, and appends + fsyncs each newly computed term so a
+      kill / SIGTERM / spot preemption loses at most the in-flight term.
+      `print_table` emits three `#`-prefixed header lines (invocation,
+      start time, column legend) and prefixes every numeric line with a
+      `[YYYY-MM-DD HH:MM:SS]` local-time stamp.
 
 **Acceptance:** test **(a)** passes; `cargo run -- --max-n 40` prints the
 correct table; `cargo run -- --verify` reports all-match on the prefix.
@@ -131,9 +146,12 @@ correct table; `cargo run -- --verify` reports all-match on the prefix.
 
 - [x] Obtain `b142886.txt` (`curl -L https://oeis.org/A142886/b142886.txt`;
       164 lines, n=0..163; the crate never fetches it).
-- [x] `#[ignore]`d `matches_oeis_prefix_full` (0..=68) and `matches_bfile`
-      (count vs b-file *and* b-file vs `REFERENCE`), bounded at
-      `verify::DEEP_BOUND = 68`; absent b-file → skip, not fail.
+- [x] `matches_oeis_prefix_full` (0..=68) and `matches_bfile` (count vs
+      b-file *and* b-file vs `REFERENCE`) both run under default
+      `cargo test`, bounded at `verify::DEEP_BOUND = 68`; absent b-file →
+      skip, not fail. The §4.6 prunes brought their cost down enough that
+      `#[ignore]` was lifted; the only remaining `#[ignore]` tests are the
+      per-bucket / per-call timing diagnostics in `src/enumerate.rs`.
 - [x] Measured release timing: pre-§4.6 n=60 ≈2.1 s, n=64 ≈4.0 s, n=68
       ≈10 s; post-§4.6 n=68 ≈0.11 s. Switching §4.2 to minimal-x-axis-cell
       bucketing is a further ≈2×, and the §4.6(b) joint cell-budget+gap
@@ -152,8 +170,8 @@ it is not pursued. The transfer/kernel reformulation was reopened and
 **built/measured under M6 for the n ≫ 110 regime, then rejected** with hard
 numbers — see §4.7 / PERFORMANCE.md.)
 
-**Acceptance:** `cargo test --release -- --ignored` matches the b-file to
-n=68 with zero mismatches — **met**.
+**Acceptance:** `cargo test --release` matches the b-file to n=68 with
+zero mismatches — **met**.
 
 ## Milestone M6 — Transfer-matrix enumerator (n ≫ 110) — REJECTED
 
