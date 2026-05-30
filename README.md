@@ -183,8 +183,9 @@ diagonal-tracking overhead.
 A shape is counted when its orbit-weighted cell total `Σ_{c ∈ S} orbit_size(c)`
 equals exactly `n` and the slice passes the edge-touch test (connectivity
 is preserved by Redelmeier growth by construction). Total counts use a
-plain `u64` — values stay well within range through `n = 163` because A142886
-grows much more slowly than the all-polyomino count.
+plain `u64`. Empirically A142886 doubles roughly every `+4` in `n` in the
+live range (a(200) ≈ 2.55·10¹⁴), so `u64::MAX ≈ 1.84·10¹⁹` is not reached
+until around `n ≈ 264..268`; the count fits comfortably through `n ≈ 263`.
 
 ## Optimizations
 
